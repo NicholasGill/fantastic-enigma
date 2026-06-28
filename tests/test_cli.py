@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 
 from wow_auction_tracker.cli import build_parser
+from wow_auction_tracker.cli import _database_size_label
+from wow_auction_tracker.cli import _format_file_size
 from wow_auction_tracker.cli import main
 
 
@@ -20,3 +22,15 @@ def test_schedule_command_requires_positive_interval() -> None:
 
     with pytest.raises(SystemExit):
         parser.parse_args(["schedule", "--interval-minutes", "0"])
+
+
+def test_database_size_label_reports_sqlite_file_size(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    db_path.write_bytes(b"x" * 2048)
+
+    assert _database_size_label(f"sqlite:///{db_path}") == "2.0 KiB"
+
+
+def test_format_file_size_uses_binary_units() -> None:
+    assert _format_file_size(12) == "12 B"
+    assert _format_file_size(1024 * 1024) == "1.0 MiB"

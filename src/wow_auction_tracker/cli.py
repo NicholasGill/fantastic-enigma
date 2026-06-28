@@ -4,6 +4,8 @@ import argparse
 import os
 from pathlib import Path
 
+from sqlalchemy.engine import make_url
+
 from wow_auction_tracker.blizzard import BlizzardClient
 from wow_auction_tracker.config import load_config
 from wow_auction_tracker.db import AuctionRepository, create_db_engine, init_db
@@ -76,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         ) as client:
             if args.command == "fetch":
                 result = fetch_and_store(config, client, repository)
-                _print_fetch_result(result)
+                _print_fetch_result(result, args.database_url)
                 return 0
 
             interval_seconds = args.interval_minutes * 60
@@ -86,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
                 interval_seconds=interval_seconds,
                 max_runs=args.max_runs,
                 run_immediately=not args.no_run_immediately,
-                on_success=_print_fetch_result,
+                on_success=lambda result: _print_fetch_result(result, args.database_url),
             )
             return 0
 
@@ -114,12 +116,37 @@ def _non_negative_int(value: str) -> int:
     return parsed
 
 
-def _print_fetch_result(result: FetchResult) -> None:
-    print(
+def _print_fetch_result(result: FetchResult, database_url: str) -> None:
+    message = (
         "Stored fetch run "
         f"{result.fetch_run_id}: {result.listing_count} listings, "
         f"{result.summary_count} item summaries"
     )
+    database_size = _database_size_label(database_url)
+    if database_size is not None:
+        message = f"{message}, database size {database_size}"
+    print(message)
+
+
+def _database_size_label(database_url: str) -> str | None:
+    url = make_url(database_url)
+    if url.get_backend_name() != "sqlite" or url.database in {None, "", ":memory:"}:
+        return None
+
+    db_path = Path(url.database)
+    if not db_path.exists():
+        return None
+    return _format_file_size(db_path.stat().st_size)
+
+
+def _format_file_size(size_bytes: int) -> str:
+    value = float(size_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
 
 
 if __name__ == "__main__":
