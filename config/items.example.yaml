@@ -1,0 +1,106 @@
+region: us
+locale: en_US
+connected_realm_id: 3683
+items:
+  - id: 210930
+    name: Bismuth
+    market: commodity
+  - id: 210931
+    name: Bismuth
+    market: commodity
+  - id: 210932
+    name: Bismuth
+    market: commodity
+  - id: 210933
+    name: Aqirite
+    market: commodity
+  - id: 210934
+    name: Aqirite
+    market: commodity
+  - id: 210935
+    name: Aqirite
+    market: commodity
+  - id: 210936
+    name: Ironclaw Ore
+    market: commodity
+  - id: 210937
+    name: Ironclaw Ore
+    market: commodity
+  - id: 210938
+    name: Ironclaw Ore
+    market: commodity
+  - id: 210796
+    name: Mycobloom
+    market: commodity
+  - id: 210797
+    name: Mycobloom
+    market: commodity
+  - id: 210798
+    name: Mycobloom
+    market: commodity
+  - id: 210799
+    name: Luredrop
+    market: commodity
+  - id: 210800
+    name: Luredrop
+    market: commodity
+  - id: 210801
+    name: Luredrop
+    market: commodity
+  - id: 210802
+    name: Orbinid
+    market: commodity
+  - id: 210803
+    name: Orbinid
+    market: commodity
+  - id: 210804
+    name: Orbinid
+    market: commodity
+  - id: 210808
+    name: Arathor's Spear
+    market: commodity
+  - id: 210809
+    name: Arathor's Spear
+    market: commodity
+  - id: 210810
+    name: Arathor's Spear
+    market: commodity
+  - id: 224828
+    name: Weavercloth
+    market: commodity
+  - id: 228231
+    name: Weavercloth
+    market: commodity
+  - id: 228232
+    name: Weavercloth
+    market: commodity
+  - id: 219946
+    name: Storm Dust
+    market: commodity
+  - id: 219947
+    name: Storm Dust
+    market: commodity
+  - id: 219948
+    name: Storm Dust
+    market: commodity
+  - id: 219949
+    name: Gleaming Shard
+    market: commodity
+  - id: 219950
+    name: Gleaming Shard
+    market: commodity
+  - id: 219951
+    name: Gleaming Shard
+    market: commodity
+  - id: 213613
+    name: Leyline Residue
+    market: commodity
+  - id: 212667
+    name: Gloom Chitin
+    market: commodity
+  - id: 212668
+    name: Gloom Chitin
+    market: commodity
+  - id: 212669
+    name: Gloom Chitin
+    market: commodity
