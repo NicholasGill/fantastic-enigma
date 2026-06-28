@@ -40,8 +40,12 @@ snapshots into useful pricing and demand signals for tracked items.
   - Show inferred demand trends for tracked items.
   - Export summaries to CSV for spreadsheet analysis.
 
-- [ ] Add scheduled snapshot support.
-  - Document a cron/systemd timer workflow for periodic `wow-auctions fetch`.
+- [x] Add built-in scheduled snapshot support.
+  - Add a built-in `wow-auctions schedule --interval-minutes ...` command.
+  - Document cron/systemd-style external scheduler options for periodic
+    `wow-auctions fetch`.
+
+- [ ] Add scheduler safety metadata.
   - Add safeguards to avoid overlapping fetch runs.
   - Record expected snapshot interval for inference calculations.
 

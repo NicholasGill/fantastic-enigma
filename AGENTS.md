@@ -22,6 +22,8 @@ Use `uv` for dependency management and command execution.
 - `uv sync --extra dev`: install runtime and test dependencies.
 - `uv run wow-auctions init-db`: initialize SQLite tables.
 - `uv run wow-auctions fetch`: fetch one configured auction snapshot.
+- `uv run wow-auctions schedule --interval-minutes 30`: fetch snapshots on a
+  fixed interval.
 - `uv run --extra dev pytest`: run the full test suite.
 
 Before opening a pull request, run every command that applies to the files you changed.
