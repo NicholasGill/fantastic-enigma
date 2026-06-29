@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from wow_auction_tracker.auction import (
+    AuctionListing,
+    calculate_item_history_metrics,
+    filter_auctions,
+    summarize_listings,
+)
+from wow_auction_tracker.clients.blizzard import BlizzardClient
+from wow_auction_tracker.config import Market, TrackerConfig
+from wow_auction_tracker.features.lifecycle import build_listing_observations
+from wow_auction_tracker.features.metadata import ItemMetadata, parse_item_metadata
+from wow_auction_tracker.storage import AuctionRepository
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    fetch_run_id: int
+    listing_count: int
+    summary_count: int
+
+
+def fetch_and_store(
+    config: TrackerConfig,
+    client: BlizzardClient,
+    repository: AuctionRepository,
+) -> FetchResult:
+    fetch_run_id = repository.start_fetch_run(config)
+
+    try:
+        metadata_items = _fetch_missing_item_metadata(config, client, repository)
+        repository.upsert_item_metadata(metadata_items)
+
+        listings: list[AuctionListing] = []
+        if config.realm_item_ids:
+            if config.connected_realm_id is None:
+                raise ValueError("connected_realm_id is required for realm items")
+            payload = client.fetch_connected_realm_auctions(config.connected_realm_id)
+            listings.extend(filter_auctions(payload, config.realm_item_ids, Market.REALM))
+
+        if config.commodity_item_ids:
+            payload = client.fetch_commodity_auctions()
+            listings.extend(filter_auctions(payload, config.commodity_item_ids, Market.COMMODITY))
+
+        summaries = summarize_listings(listings)
+        history_metrics = calculate_item_history_metrics(listings)
+        previous_fetch_run_id = repository.previous_successful_fetch_run_id(fetch_run_id)
+        previous_listings = (
+            repository.list_listing_snapshots(previous_fetch_run_id)
+            if previous_fetch_run_id is not None
+            else []
+        )
+        listing_observations = build_listing_observations(listings, previous_listings)
+        repository.complete_fetch_run(
+            fetch_run_id,
+            listings,
+            summaries,
+            history_metrics,
+            listing_observations,
+        )
+        return FetchResult(
+            fetch_run_id=fetch_run_id,
+            listing_count=len(listings),
+            summary_count=len(summaries),
+        )
+    except Exception as exc:
+        repository.fail_fetch_run(fetch_run_id, str(exc))
+        raise
+
+
+def _fetch_missing_item_metadata(
+    config: TrackerConfig,
+    client: BlizzardClient,
+    repository: AuctionRepository,
+) -> list[ItemMetadata]:
+    missing_item_ids = repository.missing_metadata_item_ids(item.id for item in config.items)
+    metadata_items: list[ItemMetadata] = []
+    for item_id in sorted(missing_item_ids):
+        item_payload = client.fetch_item(item_id)
+        media_payload = client.fetch_item_media(item_id)
+        metadata_items.append(parse_item_metadata(item_payload, media_payload))
+    return metadata_items

@@ -1,4 +1,4 @@
-from wow_auction_tracker.scheduler import run_snapshot_schedule
+from wow_auction_tracker.features.scheduler import run_snapshot_schedule
 
 
 def test_run_snapshot_schedule_runs_immediately_then_sleeps_between_runs() -> None:

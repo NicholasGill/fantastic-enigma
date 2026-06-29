@@ -11,6 +11,8 @@ from urllib.parse import parse_qs, urlparse
 
 from sqlalchemy.engine import make_url
 
+from wow_auction_tracker.features.recommendations import RecommendationEngine, recommendation_to_dict
+
 
 @dataclass(frozen=True)
 class DashboardConfig:
@@ -54,6 +56,11 @@ class DashboardDataStore:
                 "latest_run": dict(latest_run) if latest_run else None,
                 "recent_runs": self._recent_runs(connection),
                 "items": self._latest_items(connection, latest_run["id"] if latest_run else None, previous_run_id),
+                "latest_lifecycle": self._latest_lifecycle(connection, latest_run["id"] if latest_run else None),
+                "recommendations": [
+                    recommendation_to_dict(item)
+                    for item in RecommendationEngine(self.database_url).recommend(limit=8)
+                ],
             }
 
     def item_history(self, item_id: int) -> dict[str, Any]:
@@ -100,7 +107,15 @@ class DashboardDataStore:
 
     @staticmethod
     def _table_counts(connection: sqlite3.Connection) -> dict[str, int]:
-        tables = ("fetch_runs", "tracked_items", "auction_listings", "item_summaries")
+        tables = (
+            "fetch_runs",
+            "tracked_items",
+            "item_metadata",
+            "auction_listings",
+            "item_summaries",
+            "item_history_metrics",
+            "listing_observations",
+        )
         return {
             table: int(connection.execute(f"select count(*) from {table}").fetchone()[0])
             for table in tables
@@ -129,6 +144,22 @@ class DashboardDataStore:
         return [dict(row) for row in rows]
 
     @staticmethod
+    def _latest_lifecycle(connection: sqlite3.Connection, latest_run_id: int | None) -> dict[str, int]:
+        if latest_run_id is None:
+            return {}
+        rows = connection.execute(
+            """
+            select status, count(*) as count
+            from listing_observations
+            where fetch_run_id = ?
+            group by status
+            order by status
+            """,
+            (latest_run_id,),
+        ).fetchall()
+        return {str(row["status"]): int(row["count"]) for row in rows}
+
+    @staticmethod
     def _latest_items(
         connection: sqlite3.Connection,
         latest_run_id: int | None,
@@ -141,7 +172,11 @@ class DashboardDataStore:
             """
             select
                 s.item_id,
-                coalesce(t.name, 'Item ' || s.item_id) as name,
+                coalesce(m.name, t.name, 'Item ' || s.item_id) as name,
+                m.quality,
+                m.item_class,
+                m.item_subclass,
+                m.icon_url,
                 s.market,
                 s.listing_count,
                 s.total_quantity,
@@ -151,6 +186,7 @@ class DashboardDataStore:
                 p.median_unit_price as previous_median_unit_price
             from item_summaries s
             left join tracked_items t on t.item_id = s.item_id
+            left join item_metadata m on m.item_id = s.item_id
             left join item_summaries p on p.item_id = s.item_id and p.fetch_run_id = ?
             where s.fetch_run_id = ?
             order by s.min_unit_price is null, s.min_unit_price, s.item_id
@@ -376,6 +412,28 @@ DASHBOARD_HTML = """<!doctype html>
       z-index: 2;
     }
     td:first-child, th:first-child { text-align: left; }
+    .item-cell {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .item-icon {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      border: 1px solid var(--line);
+      flex: 0 0 auto;
+    }
+    .item-meta {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .item-meta small {
+      color: var(--muted);
+      font-size: 11px;
+    }
     tr { cursor: pointer; }
     tbody tr:hover { background: #f8fafc; }
     tr.selected { background: #e8f3f6; }
@@ -404,6 +462,41 @@ DASHBOARD_HTML = """<!doctype html>
       align-items: center;
       padding: 8px 0;
       border-bottom: 1px solid var(--line);
+    }
+    .recommendations {
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+      max-height: 360px;
+      overflow: auto;
+    }
+    .recommendation {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 10px;
+      cursor: pointer;
+    }
+    .recommendation:hover { background: #f8fafc; }
+    .recommendation.selected { background: #e8f3f6; }
+    .recommendation:last-child { border-bottom: 0; padding-bottom: 0; }
+    .recommendation-head {
+      display: grid;
+      grid-template-columns: 56px 1fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .recommendation strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .score {
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .reasons {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
     }
     .pill {
       display: inline-flex;
@@ -463,6 +556,8 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="metric"><span>Fetch Runs</span><strong id="fetch-runs">-</strong></div>
         <div class="metric"><span>Listings</span><strong id="listings">-</strong></div>
         <div class="metric"><span>Latest Run</span><strong id="latest-run">-</strong></div>
+        <div class="metric"><span>New Listings</span><strong id="new-listings">-</strong></div>
+        <div class="metric"><span>Missing Listings</span><strong id="missing-listings">-</strong></div>
       </div>
       <section>
         <div class="section-head">
@@ -496,6 +591,10 @@ DASHBOARD_HTML = """<!doctype html>
         </div>
       </section>
       <section>
+        <div class="section-head"><h2>Recommendations</h2></div>
+        <div class="recommendations" id="recommendations"></div>
+      </section>
+      <section>
         <div class="section-head"><h2>Recent Runs</h2></div>
         <div class="runs" id="runs"></div>
       </section>
@@ -510,8 +609,11 @@ DASHBOARD_HTML = """<!doctype html>
       fetchRuns: document.getElementById('fetch-runs'),
       listings: document.getElementById('listings'),
       latestRun: document.getElementById('latest-run'),
+      newListings: document.getElementById('new-listings'),
+      missingListings: document.getElementById('missing-listings'),
       latestTime: document.getElementById('latest-time'),
       items: document.getElementById('items'),
+      recommendations: document.getElementById('recommendations'),
       runs: document.getElementById('runs'),
       filter: document.getElementById('filter'),
       refresh: document.getElementById('refresh'),
@@ -560,8 +662,11 @@ DASHBOARD_HTML = """<!doctype html>
       els.fetchRuns.textContent = integer(overview.counts.fetch_runs);
       els.listings.textContent = integer(overview.counts.auction_listings);
       els.latestRun.textContent = overview.latest_run ? `#${overview.latest_run.id}` : '-';
+      els.newListings.textContent = integer(overview.latest_lifecycle.new);
+      els.missingListings.textContent = integer(overview.latest_lifecycle.missing);
       els.latestTime.textContent = overview.latest_run ? shortTime(overview.latest_run.finished_at) : '-';
       renderItems();
+      renderRecommendations();
       renderRuns();
     }
 
@@ -573,8 +678,10 @@ DASHBOARD_HTML = """<!doctype html>
       els.items.innerHTML = rows.map((item) => {
         const change = delta(item.min_unit_price, item.previous_min_unit_price);
         const selected = item.item_id === selectedItemId ? ' class="selected"' : '';
+        const icon = item.icon_url ? `<img class="item-icon" src="${item.icon_url}" alt="">` : '';
+        const subtitle = [item.item_class, item.item_subclass].filter(Boolean).join(' / ');
         return `<tr${selected} data-item-id="${item.item_id}">
-          <td>${item.name}</td>
+          <td><span class="item-cell">${icon}<span class="item-meta"><span>${item.name}</span><small>${subtitle}</small></span></span></td>
           <td>${item.item_id}</td>
           <td>${integer(item.listing_count)}</td>
           <td>${integer(item.total_quantity)}</td>
@@ -598,9 +705,33 @@ DASHBOARD_HTML = """<!doctype html>
       }).join('');
     }
 
+    function renderRecommendations() {
+      const rows = overview.recommendations || [];
+      if (!rows.length) {
+        els.recommendations.innerHTML = '<div class="muted">No recommendations available yet.</div>';
+        return;
+      }
+      els.recommendations.innerHTML = rows.map((item) => {
+        const selected = item.item_id === selectedItemId ? ' selected' : '';
+        return `<div class="recommendation${selected}" data-item-id="${item.item_id}">
+          <div class="recommendation-head">
+            <span class="pill">${item.action}</span>
+            <strong title="${item.name}">${item.name}</strong>
+            <span class="score">${item.score}</span>
+          </div>
+          <div class="reasons">${gold(item.latest_min_unit_price)} min, ${gold(item.average_weighted_unit_price || item.average_median_unit_price)} avg, ${item.confidence}% confidence</div>
+          <div class="reasons">${item.reasons.join('; ')}</div>
+        </div>`;
+      }).join('');
+      els.recommendations.querySelectorAll('.recommendation').forEach((row) => {
+        row.addEventListener('click', () => selectItem(Number(row.dataset.itemId)));
+      });
+    }
+
     async function selectItem(itemId) {
       selectedItemId = itemId;
       renderItems();
+      renderRecommendations();
       const response = await fetch(`/api/history?item_id=${itemId}&t=${Date.now()}`, { cache: 'no-store' });
       const payload = await response.json();
       els.chartTitle.textContent = `${payload.item.name || 'Item ' + itemId} Price History`;

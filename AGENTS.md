@@ -24,6 +24,8 @@ Use `uv` for dependency management and command execution.
 - `uv run wow-auctions fetch`: fetch one configured auction snapshot.
 - `uv run wow-auctions dashboard`: start the local dashboard at
   `http://127.0.0.1:8000`.
+- `uv run wow-auctions recommend --limit 10`: show snapshot-derived item
+  recommendations.
 - `uv run wow-auctions schedule --interval-minutes 30`: fetch snapshots on a
   fixed interval.
 - `uv run --extra dev pytest`: run the full test suite.
@@ -38,6 +40,10 @@ type hints for public boundaries, and small functions.
 Use lowercase, hyphenated documentation names, for example `docs/api-notes.md`.
 Use `PascalCase` for classes and `snake_case` for Python variables, functions,
 and modules.
+
+Keep feature-specific code grouped under `src/wow_auction_tracker/features/`.
+Use `auction/` for auction parsing and summary models, `clients/` for external
+API clients, and `storage/` for database models/repositories.
 
 ## Testing Guidelines
 

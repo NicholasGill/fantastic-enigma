@@ -73,8 +73,33 @@ uv run wow-auctions dashboard
 ```
 
 Open `http://127.0.0.1:8000` to inspect database size, snapshot counts, latest
-item summaries, recent runs, and per-item price history. Use `--port` if port
-8000 is already in use.
+item summaries, recommendations, recent runs, and per-item price history. Use
+`--port` if port 8000 is already in use.
+
+Snapshot fetches also collect missing item metadata from Blizzard's item and
+media endpoints, including item quality, class, subclass, stackability, vendor
+prices, and icon URL.
+
+Show current item recommendations from stored snapshot history:
+
+```bash
+uv run wow-auctions recommend --limit 10
+```
+
+Recommendations are conservative estimates based on current price versus recent
+median price, recent quantity drops, listing scarcity, and snapshot count. They
+are not confirmed sales because Blizzard's auction APIs expose current listings,
+not completed purchases.
+
+## Project Layout
+
+- `auction/`: auction listing parsing and summary models.
+- `clients/`: external API clients, currently Blizzard.
+- `features/dashboard/`: local dashboard server and API.
+- `features/recommendations/`: snapshot-derived recommendation scoring.
+- `features/scheduler/`: repeated snapshot runner.
+- `features/snapshots.py`: fetch-and-store workflow.
+- `storage/`: SQLAlchemy models and repository code.
 
 ## Snapshot Cadence
 

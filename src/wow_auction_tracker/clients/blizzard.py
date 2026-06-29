@@ -62,6 +62,18 @@ class BlizzardClient:
             namespace=f"dynamic-{self.region}",
         )
 
+    def fetch_item(self, item_id: int) -> dict[str, Any]:
+        return self._get(
+            f"/data/wow/item/{item_id}",
+            namespace=f"static-{self.region}",
+        )
+
+    def fetch_item_media(self, item_id: int) -> dict[str, Any]:
+        return self._get(
+            f"/data/wow/media/item/{item_id}",
+            namespace=f"static-{self.region}",
+        )
+
     def _get(self, path: str, *, namespace: str) -> dict[str, Any]:
         token = self._get_access_token()
         response = self._http_client.get(

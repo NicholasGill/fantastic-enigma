@@ -7,26 +7,28 @@ snapshots into useful pricing and demand signals for tracked items.
 
 ## Snapshot Inference Features
 
-- [ ] Store item metadata from Blizzard item and media endpoints.
+- [x] Store item metadata from Blizzard item and media endpoints.
   - Capture item name, quality, class, subclass, item level, stackability, vendor
     sell price, and icon URL.
-  - Refresh metadata only when an item is first tracked or explicitly requested.
+  - Refresh metadata when an item is first tracked.
 
-- [ ] Track listing observations across snapshots.
+- [x] Track listing observations across snapshots.
   - Record each observed auction listing by Blizzard auction ID, item ID, market,
     quantity, price, and snapshot time.
   - Keep enough data to detect whether a listing is new, still present, changed,
     or missing in later snapshots.
 
-- [ ] Infer listing lifecycle status.
+- [x] Infer listing lifecycle status.
   - Mark listings as `active`, `missing`, or `ended_estimated`.
   - Treat missing listings as uncertain because they may have sold, expired,
     been cancelled, or been reposted.
-  - Store confidence fields rather than presenting inferred sales as facts.
+  - Store `new`, `active`, `changed`, and `missing` observations. Deeper
+    `ended_estimated` confidence fields still belong with sell-through scoring.
 
-- [ ] Generate item-level historical metrics.
+- [x] Generate item-level historical metrics.
   - Calculate min, median, and weighted average unit price per snapshot.
   - Track total listed quantity, listing count, and lowest-price quantity.
+  - Persist metrics in `item_history_metrics` for new snapshots.
   - Calculate moving averages over recent snapshots.
 
 - [ ] Estimate demand and sell-through signals.
@@ -34,10 +36,15 @@ snapshots into useful pricing and demand signals for tracked items.
   - Estimate disappeared quantity and disappeared value by item.
   - Produce conservative demand scores from repeated disappearance patterns.
 
+- [x] Add initial recommendation engine.
+  - Score tracked items from current price versus recent median price.
+  - Include conservative demand proxy from recent quantity drops.
+  - Show score, confidence, and reasons in the CLI and dashboard.
+
 - [ ] Add reporting commands.
   - Show latest item summaries in gold/silver/copper.
   - Show price history for one item.
-  - Show inferred demand trends for tracked items.
+  - Show inferred recommendation scores for tracked items.
   - Export summaries to CSV for spreadsheet analysis.
 
 - [x] Add built-in scheduled snapshot support.

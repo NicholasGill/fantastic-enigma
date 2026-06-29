@@ -5,14 +5,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from wow_auction_tracker.config import TrackerConfig
-from wow_auction_tracker.db import AuctionRepository, FetchRun, create_db_engine, init_db
-from wow_auction_tracker.pipeline import fetch_and_store
+from wow_auction_tracker.features.snapshots import fetch_and_store
+from wow_auction_tracker.storage import AuctionRepository, FetchRun, create_db_engine, init_db
 
 
 class FakeClient:
     def __init__(self, realm_payload: dict[str, Any] | None = None, commodity_payload: dict[str, Any] | None = None):
         self.realm_payload = realm_payload or {"auctions": []}
         self.commodity_payload = commodity_payload or {"auctions": []}
+        self.fetched_item_ids: list[int] = []
 
     def fetch_connected_realm_auctions(self, connected_realm_id: int) -> dict[str, Any]:
         assert connected_realm_id == 3678
@@ -20,6 +21,22 @@ class FakeClient:
 
     def fetch_commodity_auctions(self) -> dict[str, Any]:
         return self.commodity_payload
+
+    def fetch_item(self, item_id: int) -> dict[str, Any]:
+        self.fetched_item_ids.append(item_id)
+        return {
+            "id": item_id,
+            "name": f"Item {item_id}",
+            "quality": {"type": "COMMON"},
+            "item_class": {"name": "Tradeskill"},
+            "item_subclass": {"name": "Metal & Stone"},
+            "inventory_type": {"type": "NON_EQUIP"},
+            "is_stackable": True,
+            "is_equippable": False,
+        }
+
+    def fetch_item_media(self, item_id: int) -> dict[str, Any]:
+        return {"id": item_id, "assets": [{"key": "icon", "value": f"https://example.test/{item_id}.jpg"}]}
 
 
 def test_fetch_and_store_combines_realm_and_commodity_sources() -> None:
@@ -44,6 +61,7 @@ def test_fetch_and_store_combines_realm_and_commodity_sources() -> None:
 
     assert result.listing_count == 2
     assert result.summary_count == 2
+    assert client.fetched_item_ids == [19019, 124105]
 
 
 def test_fetch_and_store_marks_failed_runs() -> None:

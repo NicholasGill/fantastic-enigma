@@ -2,8 +2,8 @@ from pathlib import Path
 
 from wow_auction_tracker.auction import AuctionListing, summarize_listings
 from wow_auction_tracker.config import Market, TrackerConfig
-from wow_auction_tracker.dashboard import DashboardDataStore, format_file_size
-from wow_auction_tracker.db import AuctionRepository, create_db_engine, init_db
+from wow_auction_tracker.features.dashboard import DashboardDataStore, format_file_size
+from wow_auction_tracker.storage import AuctionRepository, create_db_engine, init_db
 
 
 def test_dashboard_overview_returns_latest_counts_and_items(tmp_path: Path) -> None:

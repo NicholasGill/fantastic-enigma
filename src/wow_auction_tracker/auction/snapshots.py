@@ -38,6 +38,18 @@ class ItemSummary:
     median_unit_price: int | None
 
 
+@dataclass(frozen=True)
+class ItemHistoryMetric:
+    item_id: int
+    market: Market
+    listing_count: int
+    total_quantity: int
+    min_unit_price: int | None
+    median_unit_price: int | None
+    weighted_average_unit_price: int | None
+    lowest_price_quantity: int
+
+
 def filter_auctions(payload: dict[str, Any], item_ids: set[int], market: Market) -> list[AuctionListing]:
     listings = payload.get("auctions", [])
     if not isinstance(listings, list):
@@ -97,6 +109,46 @@ def summarize_listings(listings: Iterable[AuctionListing]) -> list[ItemSummary]:
         )
 
     return sorted(summaries, key=lambda summary: (summary.market.value, summary.item_id))
+
+
+def calculate_item_history_metrics(listings: Iterable[AuctionListing]) -> list[ItemHistoryMetric]:
+    grouped: dict[tuple[int, Market], list[AuctionListing]] = {}
+    for listing in listings:
+        grouped.setdefault((listing.item_id, listing.market), []).append(listing)
+
+    metrics: list[ItemHistoryMetric] = []
+    for (item_id, market), item_list in grouped.items():
+        priced_listings = [
+            listing
+            for listing in item_list
+            if listing.effective_unit_price is not None
+        ]
+        prices = [listing.effective_unit_price for listing in priced_listings]
+        min_price = min(prices) if prices else None
+        priced_quantity = sum(listing.quantity for listing in priced_listings)
+        weighted_total = sum(
+            listing.effective_unit_price * listing.quantity
+            for listing in priced_listings
+            if listing.effective_unit_price is not None
+        )
+        metrics.append(
+            ItemHistoryMetric(
+                item_id=item_id,
+                market=market,
+                listing_count=len(item_list),
+                total_quantity=sum(listing.quantity for listing in item_list),
+                min_unit_price=min_price,
+                median_unit_price=int(median(prices)) if prices else None,
+                weighted_average_unit_price=weighted_total // priced_quantity if priced_quantity else None,
+                lowest_price_quantity=sum(
+                    listing.quantity
+                    for listing in priced_listings
+                    if listing.effective_unit_price == min_price
+                ),
+            )
+        )
+
+    return sorted(metrics, key=lambda item: (item.market.value, item.item_id))
 
 
 def _optional_int(value: object) -> int | None:
