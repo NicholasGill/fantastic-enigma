@@ -66,6 +66,16 @@ By default, data is written to `data/auction_tracker.sqlite3`. Override it with:
 DATABASE_URL="sqlite:///data/dev.sqlite3" uv run wow-auctions fetch
 ```
 
+Start the local dashboard:
+
+```bash
+uv run wow-auctions dashboard
+```
+
+Open `http://127.0.0.1:8000` to inspect database size, snapshot counts, latest
+item summaries, recent runs, and per-item price history. Use `--port` if port
+8000 is already in use.
+
 ## Snapshot Cadence
 
 Choose a snapshot interval based on the signal you want:

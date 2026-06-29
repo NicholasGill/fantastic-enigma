@@ -8,6 +8,7 @@ from sqlalchemy.engine import make_url
 
 from wow_auction_tracker.blizzard import BlizzardClient
 from wow_auction_tracker.config import load_config
+from wow_auction_tracker.dashboard import DashboardConfig, serve_dashboard
 from wow_auction_tracker.db import AuctionRepository, create_db_engine, init_db
 from wow_auction_tracker.pipeline import FetchResult, fetch_and_store
 from wow_auction_tracker.scheduler import run_snapshot_schedule
@@ -34,6 +35,18 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init-db", help="Create database tables.")
     subparsers.add_parser("fetch", help="Fetch configured auction listings and store a snapshot.")
+    dashboard_parser = subparsers.add_parser("dashboard", help="Start the local dashboard web server.")
+    dashboard_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Dashboard bind host. Defaults to 127.0.0.1.",
+    )
+    dashboard_parser.add_argument(
+        "--port",
+        type=_positive_int,
+        default=8000,
+        help="Dashboard port. Defaults to 8000.",
+    )
     schedule_parser = subparsers.add_parser("schedule", help="Fetch snapshots repeatedly at a fixed interval.")
     schedule_parser.add_argument(
         "--interval-minutes",
@@ -62,6 +75,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "init-db":
         print(f"Initialized database at {args.database_url}")
+        return 0
+
+    if args.command == "dashboard":
+        serve_dashboard(
+            DashboardConfig(
+                database_url=args.database_url,
+                host=args.host,
+                port=args.port,
+            )
+        )
         return 0
 
     if args.command in {"fetch", "schedule"}:
