@@ -424,6 +424,11 @@ DASHBOARD_HTML = """<!doctype html>
       align-items: center;
       gap: 10px;
     }
+    .refresh-status {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
     input {
       height: 36px;
       border: 1px solid var(--line);
@@ -446,6 +451,7 @@ DASHBOARD_HTML = """<!doctype html>
     <h1>WoW Auction Tracker</h1>
     <div class="toolbar">
       <input id="filter" type="search" placeholder="Filter items">
+      <span class="refresh-status" id="refresh-status">Not refreshed</span>
       <button id="refresh" type="button">Refresh</button>
     </div>
   </header>
@@ -510,7 +516,8 @@ DASHBOARD_HTML = """<!doctype html>
       refresh: document.getElementById('refresh'),
       chart: document.getElementById('history'),
       chartTitle: document.getElementById('chart-title'),
-      chartNote: document.getElementById('chart-note')
+      chartNote: document.getElementById('chart-note'),
+      refreshStatus: document.getElementById('refresh-status')
     };
 
     function gold(copper) {
@@ -537,9 +544,12 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     async function loadOverview() {
-      const response = await fetch('/api/overview');
+      els.refresh.disabled = true;
+      const response = await fetch(`/api/overview?t=${Date.now()}`, { cache: 'no-store' });
       overview = await response.json();
       renderOverview();
+      els.refreshStatus.textContent = `Refreshed ${new Date().toLocaleTimeString()}`;
+      els.refresh.disabled = false;
       const first = overview.items[0];
       if (!selectedItemId && first) selectItem(first.item_id);
     }
@@ -590,7 +600,7 @@ DASHBOARD_HTML = """<!doctype html>
     async function selectItem(itemId) {
       selectedItemId = itemId;
       renderItems();
-      const response = await fetch(`/api/history?item_id=${itemId}`);
+      const response = await fetch(`/api/history?item_id=${itemId}&t=${Date.now()}`, { cache: 'no-store' });
       const payload = await response.json();
       els.chartTitle.textContent = `${payload.item.name || 'Item ' + itemId} Price History`;
       els.chartNote.textContent = `${payload.history.length} snapshots`;
@@ -657,7 +667,7 @@ DASHBOARD_HTML = """<!doctype html>
     els.refresh.addEventListener('click', loadOverview);
     els.filter.addEventListener('input', renderItems);
     loadOverview();
-    setInterval(loadOverview, 60000);
+    setInterval(loadOverview, 30000);
   </script>
 </body>
 </html>
