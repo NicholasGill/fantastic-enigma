@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from wow_auction_tracker.auction import AuctionListing, calculate_item_history_metrics, summarize_listings
@@ -229,3 +230,63 @@ def test_recommendations_prefer_player_sale_outcomes(tmp_path: Path) -> None:
     assert recommendation.estimated_demand_score == 70
     assert recommendation.confidence == 100
     assert any("personal sale rate" in reason for reason in recommendation.reasons)
+
+
+def test_recommendations_include_historical_timing_windows(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+    first_monday = datetime(2026, 1, 5)
+    snapshots = []
+    for week in range(4):
+        snapshots.append((first_monday + timedelta(days=(week * 7) + 1, hours=2), 5000))
+        snapshots.append((first_monday + timedelta(days=(week * 7) + 4, hours=20), 12000))
+
+    for index, (started_at, price) in enumerate(snapshots, start=1):
+        run_id = repository.start_fetch_run(config)
+        listings = [
+            AuctionListing(
+                auction_id=index,
+                item_id=210930,
+                market=Market.COMMODITY,
+                quantity=10,
+                unit_price=price,
+                buyout=None,
+                bid=None,
+                time_left="LONG",
+                raw={"id": index, "item": {"id": 210930}},
+            )
+        ]
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+        )
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "update fetch_runs set started_at = ? where id = ?",
+                (started_at.isoformat(sep=" "), run_id),
+            )
+
+    recommendation = RecommendationEngine(f"sqlite:///{db_path}", lookback_runs=8).recommend()[0]
+
+    assert recommendation.best_buy_time == "Mon 21:00 EST"
+    assert recommendation.best_sell_time == "Fri 15:00 EST"
+    assert recommendation.historical_buy_price == 5000
+    assert recommendation.historical_sell_price == 12000
+    assert recommendation.historical_timing_confidence > 0
+    assert any("historically best buy window" in reason for reason in recommendation.reasons)
+
+    utc_recommendation = RecommendationEngine(
+        f"sqlite:///{db_path}",
+        lookback_runs=8,
+        display_timezone="UTC",
+    ).recommend()[0]
+
+    assert utc_recommendation.best_buy_time == "Tue 02:00 UTC"
+    assert utc_recommendation.best_sell_time == "Fri 20:00 UTC"

@@ -71,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Minimum snapshots required before scoring an item. Defaults to 3.",
     )
+    recommend_parser.add_argument(
+        "--timezone",
+        default="America/New_York",
+        help="Timezone for historical timing labels. Defaults to America/New_York.",
+    )
     report_parser = subparsers.add_parser("report", help="Print saved snapshot data in the terminal.")
     report_subparsers = report_parser.add_subparsers(dest="report_command", required=True)
     latest_parser = report_subparsers.add_parser("latest", help="Show the latest item summaries.")
@@ -114,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Write CSV to a file instead of stdout.",
+    )
+    export_recommendations_parser.add_argument(
+        "--timezone",
+        default="America/New_York",
+        help="Timezone for historical timing labels. Defaults to America/New_York.",
     )
     import_parser = subparsers.add_parser("import-addon", help="Import companion addon SavedVariables.")
     import_parser.add_argument(
@@ -167,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
             args.database_url,
             lookback_runs=args.lookback_runs,
             min_snapshots=args.min_snapshots,
+            display_timezone=args.timezone,
         ).recommend(limit=args.limit)
         _print_recommendations(recommendations)
         return 0
@@ -198,7 +209,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.export_command == "recommendations":
-            recommendations = RecommendationEngine(args.database_url).recommend(limit=args.limit)
+            recommendations = RecommendationEngine(
+                args.database_url,
+                display_timezone=args.timezone,
+            ).recommend(limit=args.limit)
             _write_csv(
                 _recommendation_rows_for_export(recommendations),
                 args.output,
@@ -381,6 +395,11 @@ _LATEST_EXPORT_FIELDNAMES = [
     "recommendation_confidence",
     "recommended_buy_price",
     "recommended_sell_price",
+    "best_buy_time",
+    "best_sell_time",
+    "historical_buy_price",
+    "historical_sell_price",
+    "historical_timing_confidence",
 ]
 _ITEM_HISTORY_EXPORT_FIELDNAMES = [
     "item_id",
@@ -423,6 +442,11 @@ _RECOMMENDATION_EXPORT_FIELDNAMES = [
     "player_cancelled_count",
     "player_sale_rate",
     "average_player_net_proceeds",
+    "best_buy_time",
+    "best_sell_time",
+    "historical_buy_price",
+    "historical_sell_price",
+    "historical_timing_confidence",
     "reasons",
 ]
 
@@ -484,6 +508,11 @@ def _latest_rows_for_export(overview: dict[str, object]) -> list[dict[str, objec
                 "recommendation_confidence": recommendation["confidence"] if recommendation else "",
                 "recommended_buy_price": recommendation["recommended_buy_price"] if recommendation else "",
                 "recommended_sell_price": recommendation["recommended_sell_price"] if recommendation else "",
+                "best_buy_time": recommendation["best_buy_time"] if recommendation else "",
+                "best_sell_time": recommendation["best_sell_time"] if recommendation else "",
+                "historical_buy_price": recommendation["historical_buy_price"] if recommendation else "",
+                "historical_sell_price": recommendation["historical_sell_price"] if recommendation else "",
+                "historical_timing_confidence": recommendation["historical_timing_confidence"] if recommendation else "",
             }
         )
     return export_rows
@@ -547,6 +576,11 @@ def _recommendation_rows_for_export(recommendations: list[Recommendation]) -> li
             "player_cancelled_count": item.player_cancelled_count,
             "player_sale_rate": item.player_sale_rate,
             "average_player_net_proceeds": item.average_player_net_proceeds,
+            "best_buy_time": item.best_buy_time,
+            "best_sell_time": item.best_sell_time,
+            "historical_buy_price": item.historical_buy_price,
+            "historical_sell_price": item.historical_sell_price,
+            "historical_timing_confidence": item.historical_timing_confidence,
             "reasons": "; ".join(item.reasons),
         }
         for item in recommendations

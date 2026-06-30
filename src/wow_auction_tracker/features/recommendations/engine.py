@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.engine import make_url
 
@@ -34,6 +36,11 @@ class RecommendationInputs:
     player_cancelled_count: int
     player_sale_rate: float
     average_player_net_proceeds: int | None
+    best_buy_time: str | None
+    best_sell_time: str | None
+    historical_buy_price: int | None
+    historical_sell_price: int | None
+    historical_timing_confidence: int
 
 
 @dataclass(frozen=True)
@@ -61,11 +68,26 @@ class Recommendation:
     player_cancelled_count: int
     player_sale_rate: float
     average_player_net_proceeds: int | None
+    best_buy_time: str | None
+    best_sell_time: str | None
+    historical_buy_price: int | None
+    historical_sell_price: int | None
+    historical_timing_confidence: int
     reasons: list[str]
 
 
+DEFAULT_DISPLAY_TIMEZONE = "America/New_York"
+
+
 class RecommendationEngine:
-    def __init__(self, database_url: str, *, lookback_runs: int = 12, min_snapshots: int = 3) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        lookback_runs: int = 12,
+        min_snapshots: int = 3,
+        display_timezone: str = DEFAULT_DISPLAY_TIMEZONE,
+    ) -> None:
         if lookback_runs <= 1:
             raise ValueError("lookback_runs must be greater than 1")
         if min_snapshots <= 0:
@@ -74,6 +96,7 @@ class RecommendationEngine:
         self.database_path = _sqlite_database_path(database_url)
         self.lookback_runs = lookback_runs
         self.min_snapshots = min_snapshots
+        self.display_timezone = _display_timezone(display_timezone)
 
     def recommend(self, *, limit: int | None = None) -> list[Recommendation]:
         inputs = self._load_inputs()
@@ -147,6 +170,12 @@ class RecommendationEngine:
             self.lookback_runs,
         )
         player_outcomes = _load_player_outcome_inputs(connection, int(item_row["item_id"]))
+        timing = _load_historical_timing_inputs(
+            connection,
+            int(item_row["item_id"]),
+            source_table,
+            self.display_timezone,
+        )
 
         return RecommendationInputs(
             item_id=int(item_row["item_id"]),
@@ -174,6 +203,11 @@ class RecommendationEngine:
             player_cancelled_count=player_outcomes["cancelled_count"],
             player_sale_rate=player_outcomes["sale_rate"],
             average_player_net_proceeds=player_outcomes["average_net_proceeds"],
+            best_buy_time=timing["best_buy_time"],
+            best_sell_time=timing["best_sell_time"],
+            historical_buy_price=timing["historical_buy_price"],
+            historical_sell_price=timing["historical_sell_price"],
+            historical_timing_confidence=timing["historical_timing_confidence"],
         )
 
     def _score(self, inputs: RecommendationInputs) -> Recommendation:
@@ -202,6 +236,11 @@ class RecommendationEngine:
                 player_cancelled_count=inputs.player_cancelled_count,
                 player_sale_rate=inputs.player_sale_rate,
                 average_player_net_proceeds=inputs.average_player_net_proceeds,
+                best_buy_time=inputs.best_buy_time,
+                best_sell_time=inputs.best_sell_time,
+                historical_buy_price=inputs.historical_buy_price,
+                historical_sell_price=inputs.historical_sell_price,
+                historical_timing_confidence=inputs.historical_timing_confidence,
                 reasons=[f"needs at least {self.min_snapshots} snapshots"],
             )
 
@@ -243,6 +282,11 @@ class RecommendationEngine:
             player_cancelled_count=inputs.player_cancelled_count,
             player_sale_rate=inputs.player_sale_rate,
             average_player_net_proceeds=inputs.average_player_net_proceeds,
+            best_buy_time=inputs.best_buy_time,
+            best_sell_time=inputs.best_sell_time,
+            historical_buy_price=inputs.historical_buy_price,
+            historical_sell_price=inputs.historical_sell_price,
+            historical_timing_confidence=inputs.historical_timing_confidence,
             reasons=_reasons(inputs, price_score, scarcity_score, demand_score),
         )
 
@@ -272,6 +316,11 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "player_cancelled_count": recommendation.player_cancelled_count,
         "player_sale_rate": recommendation.player_sale_rate,
         "average_player_net_proceeds": recommendation.average_player_net_proceeds,
+        "best_buy_time": recommendation.best_buy_time,
+        "best_sell_time": recommendation.best_sell_time,
+        "historical_buy_price": recommendation.historical_buy_price,
+        "historical_sell_price": recommendation.historical_sell_price,
+        "historical_timing_confidence": recommendation.historical_timing_confidence,
         "reasons": recommendation.reasons,
     }
 
@@ -401,6 +450,130 @@ def _empty_player_outcomes() -> dict[str, Any]:
     }
 
 
+def _load_historical_timing_inputs(
+    connection: sqlite3.Connection,
+    item_id: int,
+    source_table: str,
+    display_timezone: ZoneInfo,
+) -> dict[str, Any]:
+    rows = connection.execute(
+        f"""
+        select
+            r.started_at,
+            s.min_unit_price,
+            s.first_quartile_unit_price,
+            s.median_unit_price
+        from {source_table} s
+        join fetch_runs r on r.id = s.fetch_run_id
+        where s.item_id = ? and r.status = 'success'
+        order by s.fetch_run_id
+        """,
+        (item_id,),
+    ).fetchall()
+    buckets: dict[tuple[int, int], dict[str, list[int]]] = {}
+    weeks: set[tuple[int, int]] = set()
+    for row in rows:
+        started_at = _parse_datetime(row["started_at"])
+        if started_at is None:
+            continue
+        buy_price = _first_int(row["min_unit_price"], row["first_quartile_unit_price"], row["median_unit_price"])
+        sell_price = _first_int(row["first_quartile_unit_price"], row["median_unit_price"], row["min_unit_price"])
+        if buy_price is None and sell_price is None:
+            continue
+
+        local_started_at = _as_display_time(started_at, display_timezone)
+        iso_year, iso_week, _ = local_started_at.isocalendar()
+        weeks.add((iso_year, iso_week))
+        bucket_key = (local_started_at.weekday(), local_started_at.hour)
+        bucket = buckets.setdefault(bucket_key, {"buy": [], "sell": []})
+        if buy_price is not None:
+            bucket["buy"].append(buy_price)
+        if sell_price is not None:
+            bucket["sell"].append(sell_price)
+
+    buy_buckets = [
+        (key, values["buy"])
+        for key, values in buckets.items()
+        if values["buy"]
+    ]
+    sell_buckets = [
+        (key, values["sell"])
+        for key, values in buckets.items()
+        if values["sell"]
+    ]
+    if len(buy_buckets) < 2 or len(sell_buckets) < 2:
+        return _empty_timing_inputs()
+
+    best_buy_key, best_buy_values = min(buy_buckets, key=lambda item: mean(item[1]))
+    best_sell_key, best_sell_values = max(sell_buckets, key=lambda item: mean(item[1]))
+    sample_count = sum(len(values["buy"]) for values in buckets.values())
+    confidence = _historical_timing_confidence(sample_count, len(weeks), len(buckets))
+    return {
+        "best_buy_time": _bucket_label(best_buy_key, display_timezone),
+        "best_sell_time": _bucket_label(best_sell_key, display_timezone),
+        "historical_buy_price": int(mean(best_buy_values)),
+        "historical_sell_price": int(mean(best_sell_values)),
+        "historical_timing_confidence": confidence,
+    }
+
+
+def _empty_timing_inputs() -> dict[str, Any]:
+    return {
+        "best_buy_time": None,
+        "best_sell_time": None,
+        "historical_buy_price": None,
+        "historical_sell_price": None,
+        "historical_timing_confidence": 0,
+    }
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).replace("T", " ")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _as_display_time(value: datetime, display_timezone: ZoneInfo) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(display_timezone)
+
+
+def _display_timezone(value: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(value)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"unknown timezone {value!r}") from exc
+
+
+def _first_int(*values: Any) -> int | None:
+    for value in values:
+        if value is not None:
+            return int(value)
+    return None
+
+
+def _bucket_label(bucket_key: tuple[int, int], display_timezone: ZoneInfo) -> str:
+    weekdays = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    weekday, hour = bucket_key
+    sample_date = datetime(2026, 1, 5 + weekday, hour, tzinfo=display_timezone)
+    abbreviation = sample_date.tzname() or display_timezone.key
+    return f"{weekdays[weekday]} {hour:02d}:00 {abbreviation}"
+
+
+def _historical_timing_confidence(sample_count: int, week_count: int, bucket_count: int) -> int:
+    sample_score = min(sample_count / 56, 1.0)
+    week_score = min(week_count / 4, 1.0)
+    bucket_score = min(bucket_count / 8, 1.0)
+    return round(((sample_score * 0.4) + (week_score * 0.4) + (bucket_score * 0.2)) * 100)
+
+
 def _scarcity_score(latest_listing_count: int, average_listing_count: float) -> int:
     if average_listing_count <= 0:
         return 0
@@ -469,6 +642,15 @@ def _reasons(
             reasons.append(f"recent listed quantity dropped by an estimated {demand_score}%")
     if inputs.average_player_net_proceeds is not None:
         reasons.append(f"average personal sale proceeds are {inputs.average_player_net_proceeds / 10000:.2f}g")
+    if inputs.historical_timing_confidence > 0 and inputs.best_buy_time and inputs.best_sell_time:
+        reasons.append(
+            "historically best buy window is "
+            f"{inputs.best_buy_time} near {inputs.historical_buy_price / 10000:.2f}g"
+        )
+        reasons.append(
+            "historically best sell window is "
+            f"{inputs.best_sell_time} near {inputs.historical_sell_price / 10000:.2f}g"
+        )
     if scarcity_score > 0:
         reasons.append(f"listing count is {scarcity_score}% below recent average")
     if inputs.snapshots > 0:
