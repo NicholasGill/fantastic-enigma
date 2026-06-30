@@ -47,17 +47,34 @@ def test_dashboard_overview_returns_latest_counts_and_items(tmp_path: Path) -> N
         )
     ]
     repository.complete_fetch_run(second_run_id, second_listings, summarize_listings(second_listings))
+    third_run_id = repository.start_fetch_run(config)
+    third_listings = [
+        AuctionListing(
+            auction_id=3,
+            item_id=210930,
+            market=Market.COMMODITY,
+            quantity=5,
+            unit_price=15000,
+            buyout=None,
+            bid=None,
+            time_left="SHORT",
+            raw={"id": 3, "item": {"id": 210930}},
+        )
+    ]
+    repository.complete_fetch_run(third_run_id, third_listings, summarize_listings(third_listings))
 
     payload = DashboardDataStore(f"sqlite:///{db_path}").overview()
 
-    assert payload["counts"]["fetch_runs"] == 2
-    assert payload["counts"]["auction_listings"] == 2
-    assert payload["latest_run"]["id"] == second_run_id
+    assert payload["counts"]["fetch_runs"] == 3
+    assert payload["counts"]["auction_listings"] == 3
+    assert payload["latest_run"]["id"] == third_run_id
     assert payload["items"][0]["name"] == "Bismuth"
     assert payload["items"][0]["min_unit_price"] == 15000
     assert payload["items"][0]["first_quartile_unit_price"] == 15000
     assert payload["items"][0]["third_quartile_unit_price"] == 15000
     assert payload["items"][0]["previous_min_unit_price"] == 20000
+    assert payload["items"][0]["recommended_buy_price"] is not None
+    assert payload["items"][0]["recommended_sell_price"] is not None
 
 
 def test_dashboard_item_history_returns_rows_in_fetch_order(tmp_path: Path) -> None:

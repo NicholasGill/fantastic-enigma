@@ -46,6 +46,7 @@ class Recommendation:
     confidence: int
     latest_min_unit_price: int | None
     latest_median_unit_price: int | None
+    recommended_buy_price: int | None
     recommended_sell_price: int | None
     average_first_quartile_unit_price: int | None
     average_median_unit_price: int | None
@@ -186,6 +187,7 @@ class RecommendationEngine:
                 confidence=_confidence(inputs.snapshots, self.lookback_runs),
                 latest_min_unit_price=inputs.latest_min_unit_price,
                 latest_median_unit_price=inputs.latest_median_unit_price,
+                recommended_buy_price=_recommended_buy_price(inputs),
                 recommended_sell_price=_recommended_sell_price(inputs),
                 average_first_quartile_unit_price=inputs.average_first_quartile_unit_price,
                 average_median_unit_price=inputs.average_median_unit_price,
@@ -226,6 +228,7 @@ class RecommendationEngine:
             confidence=confidence,
             latest_min_unit_price=inputs.latest_min_unit_price,
             latest_median_unit_price=inputs.latest_median_unit_price,
+            recommended_buy_price=_recommended_buy_price(inputs),
             recommended_sell_price=_recommended_sell_price(inputs),
             average_first_quartile_unit_price=inputs.average_first_quartile_unit_price,
             average_median_unit_price=inputs.average_median_unit_price,
@@ -254,6 +257,7 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "confidence": recommendation.confidence,
         "latest_min_unit_price": recommendation.latest_min_unit_price,
         "latest_median_unit_price": recommendation.latest_median_unit_price,
+        "recommended_buy_price": recommendation.recommended_buy_price,
         "recommended_sell_price": recommendation.recommended_sell_price,
         "average_first_quartile_unit_price": recommendation.average_first_quartile_unit_price,
         "average_median_unit_price": recommendation.average_median_unit_price,
@@ -292,6 +296,17 @@ def _recommended_sell_price(inputs: RecommendationInputs) -> int | None:
         or inputs.average_median_unit_price
         or inputs.latest_median_unit_price
     )
+
+
+def _recommended_buy_price(inputs: RecommendationInputs) -> int | None:
+    sell_price = _recommended_sell_price(inputs)
+    if sell_price is None:
+        return inputs.latest_min_unit_price
+
+    target_buy_price = round(sell_price * 0.8)
+    if inputs.latest_min_unit_price is not None and inputs.latest_min_unit_price <= target_buy_price:
+        return inputs.latest_min_unit_price
+    return target_buy_price
 
 
 def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:

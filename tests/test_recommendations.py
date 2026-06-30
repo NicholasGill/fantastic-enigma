@@ -45,6 +45,7 @@ def test_recommendations_score_discounted_item_with_quantity_drop(tmp_path: Path
     assert recommendations[0].score >= 35
     assert recommendations[0].action in {"buy", "watch"}
     assert recommendations[0].estimated_demand_score > 0
+    assert recommendations[0].recommended_buy_price == 5000
     assert recommendations[0].recommended_sell_price == 8333
     assert recommendations[0].average_first_quartile_unit_price == 8333
     assert recommendations[0].average_weighted_unit_price is not None
@@ -112,6 +113,7 @@ def test_recommendations_fall_back_to_summaries_while_metrics_warm_up(tmp_path: 
     recommendations = RecommendationEngine(f"sqlite:///{db_path}", min_snapshots=3).recommend()
 
     assert recommendations[0].score > 0
+    assert recommendations[0].recommended_buy_price is not None
     assert recommendations[0].recommended_sell_price is not None
     assert recommendations[0].reasons != ["needs at least 3 snapshots"]
 

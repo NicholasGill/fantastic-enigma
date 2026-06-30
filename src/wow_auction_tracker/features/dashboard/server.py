@@ -50,17 +50,36 @@ class DashboardDataStore:
                 ).fetchone()
                 previous_run_id = previous["id"] if previous else None
 
+            all_recommendations = [
+                recommendation_to_dict(item)
+                for item in RecommendationEngine(self.database_url).recommend()
+            ]
+            recommendations = all_recommendations[:8]
+            recommendation_by_item_id = {
+                int(item["item_id"]): item
+                for item in all_recommendations
+            }
+            items = self._latest_items(connection, latest_run["id"] if latest_run else None, previous_run_id)
+            for item in items:
+                recommendation = recommendation_by_item_id.get(int(item["item_id"]))
+                if recommendation is None:
+                    continue
+                item["recommended_buy_price"] = recommendation.get("recommended_buy_price")
+                item["recommended_sell_price"] = recommendation.get("recommended_sell_price")
+                item["recommendation_action"] = recommendation.get("action")
+                item["recommendation_score"] = recommendation.get("score")
+                item["recommendation_confidence"] = recommendation.get("confidence")
+                item["average_sell_through_ratio"] = recommendation.get("average_sell_through_ratio")
+                item["average_sell_through_ratio_bps"] = round(float(recommendation.get("average_sell_through_ratio") or 0) * 10000)
+
             return {
                 "database": self._database_info(),
                 "counts": self._table_counts(connection),
                 "latest_run": dict(latest_run) if latest_run else None,
                 "recent_runs": self._recent_runs(connection),
-                "items": self._latest_items(connection, latest_run["id"] if latest_run else None, previous_run_id),
+                "items": items,
                 "latest_lifecycle": self._latest_lifecycle(connection, latest_run["id"] if latest_run else None),
-                "recommendations": [
-                    recommendation_to_dict(item)
-                    for item in RecommendationEngine(self.database_url).recommend(limit=8)
-                ],
+                "recommendations": recommendations,
             }
 
     def item_history(self, item_id: int) -> dict[str, Any]:
@@ -199,7 +218,24 @@ class DashboardDataStore:
                 st.disappeared_quantity,
                 st.disappeared_value,
                 st.confidence as sell_through_confidence,
-                p.min_unit_price as previous_min_unit_price,
+                coalesce(
+                    (
+                        select ps.min_unit_price
+                        from item_summaries ps
+                        join fetch_runs pr on pr.id = ps.fetch_run_id
+                        where ps.item_id = s.item_id
+                            and ps.fetch_run_id < s.fetch_run_id
+                            and pr.status = 'success'
+                            and (
+                                ps.min_unit_price is not s.min_unit_price
+                                or (ps.min_unit_price is null and s.min_unit_price is not null)
+                                or (ps.min_unit_price is not null and s.min_unit_price is null)
+                            )
+                        order by ps.fetch_run_id desc
+                        limit 1
+                    ),
+                    p.min_unit_price
+                ) as previous_min_unit_price,
                 p.median_unit_price as previous_median_unit_price
             from item_summaries s
             left join tracked_items t on t.item_id = s.item_id
@@ -410,7 +446,7 @@ DASHBOARD_HTML = """<!doctype html>
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 880px;
+      min-width: 1040px;
     }
     th, td {
       padding: 10px 12px;
@@ -594,6 +630,8 @@ DASHBOARD_HTML = """<!doctype html>
                 <th>Q1</th>
                 <th>Median</th>
                 <th>Q3</th>
+                <th>Buy At</th>
+                <th>Sell At</th>
                 <th>Sell-through</th>
                 <th>Min Change</th>
               </tr>
@@ -703,6 +741,7 @@ DASHBOARD_HTML = """<!doctype html>
       });
       els.items.innerHTML = rows.map((item) => {
         const change = delta(item.min_unit_price, item.previous_min_unit_price);
+        const sellThroughBps = item.average_sell_through_ratio_bps ?? item.sell_through_ratio_bps;
         const selected = item.item_id === selectedItemId ? ' class="selected"' : '';
         const icon = item.icon_url ? `<img class="item-icon" src="${item.icon_url}" alt="">` : '';
         const subtitle = [item.item_class, item.item_subclass].filter(Boolean).join(' / ');
@@ -715,7 +754,9 @@ DASHBOARD_HTML = """<!doctype html>
           <td>${gold(item.first_quartile_unit_price)}</td>
           <td>${gold(item.median_unit_price)}</td>
           <td>${gold(item.third_quartile_unit_price)}</td>
-          <td>${bps(item.sell_through_ratio_bps)}</td>
+          <td>${gold(item.recommended_buy_price)}</td>
+          <td>${gold(item.recommended_sell_price)}</td>
+          <td>${bps(sellThroughBps)}</td>
           <td class="${change.cls}">${change.text}</td>
         </tr>`;
       }).join('');
@@ -748,7 +789,7 @@ DASHBOARD_HTML = """<!doctype html>
             <strong title="${item.name}">${item.name}</strong>
             <span class="score">${item.score}</span>
           </div>
-          <div class="reasons">${gold(item.latest_min_unit_price)} min, ${gold(item.recommended_sell_price)} sell, ${item.confidence}% confidence</div>
+          <div class="reasons">${gold(item.recommended_buy_price)} buy, ${gold(item.recommended_sell_price)} sell, ${item.confidence}% confidence</div>
           <div class="reasons">${item.reasons.join('; ')}</div>
         </div>`;
       }).join('');

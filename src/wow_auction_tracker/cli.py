@@ -291,7 +291,7 @@ def _print_recommendations(recommendations: list[Recommendation]) -> None:
         print("No recommendations available")
         return
 
-    print("Action  Score  Conf  Item ID  Name                 Min       Sell At    Reasons")
+    print("Action  Score  Conf  Item ID  Name                 Buy At    Sell At    Reasons")
     for item in recommendations:
         reasons = "; ".join(item.reasons)
         print(
@@ -300,7 +300,7 @@ def _print_recommendations(recommendations: list[Recommendation]) -> None:
             f"{item.confidence:>4}  "
             f"{item.item_id:<7}  "
             f"{item.name[:20]:<20} "
-            f"{_format_copper(item.latest_min_unit_price):>9} "
+            f"{_format_copper(item.recommended_buy_price):>9} "
             f"{_format_copper(item.recommended_sell_price):>9}  "
             f"{reasons}"
         )
@@ -379,6 +379,7 @@ _LATEST_EXPORT_FIELDNAMES = [
     "recommendation_action",
     "recommendation_score",
     "recommendation_confidence",
+    "recommended_buy_price",
     "recommended_sell_price",
 ]
 _ITEM_HISTORY_EXPORT_FIELDNAMES = [
@@ -407,6 +408,7 @@ _RECOMMENDATION_EXPORT_FIELDNAMES = [
     "confidence",
     "latest_min_unit_price",
     "latest_median_unit_price",
+    "recommended_buy_price",
     "recommended_sell_price",
     "average_first_quartile_unit_price",
     "average_median_unit_price",
@@ -480,6 +482,7 @@ def _latest_rows_for_export(overview: dict[str, object]) -> list[dict[str, objec
                 "recommendation_action": recommendation["action"] if recommendation else "",
                 "recommendation_score": recommendation["score"] if recommendation else "",
                 "recommendation_confidence": recommendation["confidence"] if recommendation else "",
+                "recommended_buy_price": recommendation["recommended_buy_price"] if recommendation else "",
                 "recommended_sell_price": recommendation["recommended_sell_price"] if recommendation else "",
             }
         )
@@ -529,6 +532,7 @@ def _recommendation_rows_for_export(recommendations: list[Recommendation]) -> li
             "confidence": item.confidence,
             "latest_min_unit_price": item.latest_min_unit_price,
             "latest_median_unit_price": item.latest_median_unit_price,
+            "recommended_buy_price": item.recommended_buy_price,
             "recommended_sell_price": item.recommended_sell_price,
             "average_first_quartile_unit_price": item.average_first_quartile_unit_price,
             "average_median_unit_price": item.average_median_unit_price,

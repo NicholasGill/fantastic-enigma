@@ -163,6 +163,7 @@ def test_export_latest_command_writes_csv(capsys: pytest.CaptureFixture[str], tm
     assert rows[0]["item_id"] == "210930"
     assert rows[0]["name"] == "Bismuth"
     assert rows[0]["recommendation_action"] == "watch"
+    assert rows[0]["recommended_buy_price"] == "80"
     assert rows[0]["recommended_sell_price"] == "100"
 
 
@@ -221,6 +222,7 @@ def test_export_recommendations_command_writes_csv_stdout(capsys: pytest.Capture
     assert len(rows) == 1
     assert rows[0]["item_id"] == "210930"
     assert rows[0]["action"] == "watch"
+    assert rows[0]["recommended_buy_price"] == "80"
     assert rows[0]["recommended_sell_price"] == "100"
 
 
