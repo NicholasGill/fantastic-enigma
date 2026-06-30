@@ -123,6 +123,9 @@ class DashboardDataStore:
             "item_history_metrics",
             "listing_observations",
             "sell_through_metrics",
+            "addon_imports",
+            "player_auction_posts",
+            "player_auction_outcomes",
         )
         return {
             table: int(connection.execute(f"select count(*) from {table}").fetchone()[0])

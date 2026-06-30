@@ -158,3 +158,72 @@ def test_recommendations_use_inferred_sell_through(tmp_path: Path) -> None:
     assert recommendation.estimated_demand_score > 0
     assert recommendation.average_sell_through_ratio > 0
     assert any("inferred sell-through" in reason for reason in recommendation.reasons)
+
+
+def test_recommendations_prefer_player_sale_outcomes(tmp_path: Path) -> None:
+    from wow_auction_tracker.features.player import import_saved_variables
+
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+
+    for index, price in enumerate([10000, 9500, 9000], start=1):
+        run_id = repository.start_fetch_run(config)
+        listings = [
+            AuctionListing(
+                auction_id=index,
+                item_id=210930,
+                market=Market.COMMODITY,
+                quantity=10,
+                unit_price=price,
+                buyout=None,
+                bid=None,
+                time_left="LONG",
+                raw={"id": index, "item": {"id": 210930}},
+            )
+        ]
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+        )
+
+    saved_variables = tmp_path / "WowAuctionTracker.lua"
+    saved_variables.write_text(
+        """
+        WowAuctionTrackerDB = {
+          ["version"] = 1,
+          ["owned_snapshots"] = {
+            { ["item_id"] = 210930 }, { ["item_id"] = 210930 }, { ["item_id"] = 210930 },
+            { ["item_id"] = 210930 }, { ["item_id"] = 210930 }, { ["item_id"] = 210930 },
+            { ["item_id"] = 210930 }, { ["item_id"] = 210930 }, { ["item_id"] = 210930 },
+            { ["item_id"] = 210930 },
+          },
+          ["mail_events"] = {
+            { ["outcome"] = "sold", ["money"] = 100000, ["first_item_id"] = 210930 },
+            { ["outcome"] = "sold", ["money"] = 90000, ["first_item_id"] = 210930 },
+            { ["outcome"] = "sold", ["money"] = 80000, ["first_item_id"] = 210930 },
+            { ["outcome"] = "sold", ["money"] = 70000, ["first_item_id"] = 210930 },
+            { ["outcome"] = "sold", ["money"] = 60000, ["first_item_id"] = 210930 },
+            { ["outcome"] = "sold", ["money"] = 50000, ["first_item_id"] = 210930 },
+            { ["outcome"] = "sold", ["money"] = 40000, ["first_item_id"] = 210930 },
+          },
+        }
+        """,
+        encoding="utf-8",
+    )
+    repository.import_addon_data(import_saved_variables(saved_variables))
+
+    recommendation = RecommendationEngine(f"sqlite:///{db_path}", lookback_runs=3).recommend()[0]
+
+    assert recommendation.player_post_count == 10
+    assert recommendation.player_sold_count == 7
+    assert recommendation.player_sale_rate == 0.7
+    assert recommendation.estimated_demand_score == 70
+    assert recommendation.confidence == 100
+    assert any("personal sale rate" in reason for reason in recommendation.reasons)

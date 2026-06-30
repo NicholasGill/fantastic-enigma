@@ -32,3 +32,20 @@ def test_run_snapshot_schedule_can_wait_before_first_run() -> None:
     assert completed == 1
     assert runs == ["run"]
     assert sleeps == [60]
+
+
+def test_run_snapshot_schedule_does_not_overlap_slow_tasks() -> None:
+    in_progress = False
+    max_concurrent = 0
+
+    def task() -> None:
+        nonlocal in_progress, max_concurrent
+        if in_progress:
+            max_concurrent += 1
+        in_progress = True
+        in_progress = False
+
+    completed = run_snapshot_schedule(task, interval_seconds=60, max_runs=3, sleep=lambda _: None)
+
+    assert completed == 3
+    assert max_concurrent == 0

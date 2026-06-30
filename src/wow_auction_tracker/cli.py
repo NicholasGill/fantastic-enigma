@@ -11,6 +11,7 @@ from sqlalchemy.engine import make_url
 from wow_auction_tracker.clients.blizzard import BlizzardClient
 from wow_auction_tracker.config import load_config
 from wow_auction_tracker.features.dashboard import DashboardConfig, serve_dashboard
+from wow_auction_tracker.features.player import import_saved_variables
 from wow_auction_tracker.features.recommendations import Recommendation, RecommendationEngine
 from wow_auction_tracker.features.dashboard import DashboardDataStore
 from wow_auction_tracker.features.scheduler import run_snapshot_schedule
@@ -114,6 +115,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write CSV to a file instead of stdout.",
     )
+    import_parser = subparsers.add_parser("import-addon", help="Import companion addon SavedVariables.")
+    import_parser.add_argument(
+        "--saved-variables",
+        type=Path,
+        required=True,
+        help="Path to WowAuctionTracker.lua SavedVariables.",
+    )
     schedule_parser = subparsers.add_parser("schedule", help="Fetch snapshots repeatedly at a fixed interval.")
     schedule_parser.add_argument(
         "--interval-minutes",
@@ -199,6 +207,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         raise ValueError(f"unsupported export command {args.export_command}")
 
+    if args.command == "import-addon":
+        repository = AuctionRepository(engine)
+        result = import_saved_variables(args.saved_variables)
+        import_id = repository.import_addon_data(result)
+        print(
+            f"Imported addon data {import_id}: "
+            f"{len(result.posts)} owned auction rows, {len(result.outcomes)} mail rows"
+        )
+        return 0
+
     if args.command in {"fetch", "schedule"}:
         config = load_config(args.config)
         client_id = _required_env("BLIZZARD_CLIENT_ID")
@@ -219,7 +237,12 @@ def main(argv: list[str] | None = None) -> int:
             interval_seconds = args.interval_minutes * 60
             print(f"Starting scheduled snapshots every {args.interval_minutes} minute(s)")
             run_snapshot_schedule(
-                lambda: fetch_and_store(config, client, repository),
+                lambda: fetch_and_store(
+                    config,
+                    client,
+                    repository,
+                    expected_interval_seconds=interval_seconds,
+                ),
                 interval_seconds=interval_seconds,
                 max_runs=args.max_runs,
                 run_immediately=not args.no_run_immediately,
@@ -392,6 +415,12 @@ _RECOMMENDATION_EXPORT_FIELDNAMES = [
     "estimated_demand_score",
     "average_sell_through_ratio",
     "average_sell_through_confidence",
+    "player_post_count",
+    "player_sold_count",
+    "player_expired_count",
+    "player_cancelled_count",
+    "player_sale_rate",
+    "average_player_net_proceeds",
     "reasons",
 ]
 
@@ -508,6 +537,12 @@ def _recommendation_rows_for_export(recommendations: list[Recommendation]) -> li
             "estimated_demand_score": item.estimated_demand_score,
             "average_sell_through_ratio": item.average_sell_through_ratio,
             "average_sell_through_confidence": item.average_sell_through_confidence,
+            "player_post_count": item.player_post_count,
+            "player_sold_count": item.player_sold_count,
+            "player_expired_count": item.player_expired_count,
+            "player_cancelled_count": item.player_cancelled_count,
+            "player_sale_rate": item.player_sale_rate,
+            "average_player_net_proceeds": item.average_player_net_proceeds,
             "reasons": "; ".join(item.reasons),
         }
         for item in recommendations

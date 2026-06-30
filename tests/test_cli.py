@@ -235,3 +235,34 @@ def test_export_latest_command_writes_headers_for_empty_results(capsys: pytest.C
     assert exit_code == 0
     assert output_path.read_text(encoding="utf-8").startswith("item_id,name,market")
     assert capsys.readouterr().out == ""
+
+
+def test_import_addon_command_stores_saved_variables(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    saved_variables = tmp_path / "WowAuctionTracker.lua"
+    saved_variables.write_text(
+        """
+        WowAuctionTrackerDB = {
+          ["version"] = 1,
+          ["owned_snapshots"] = {
+            { ["auction_id"] = 42, ["item_id"] = 210930, ["quantity"] = 5, ["unit_price"] = 10000 },
+          },
+          ["mail_events"] = {
+            { ["outcome"] = "expired", ["first_item_id"] = 210930, ["first_item_count"] = 5 },
+          },
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    exit_code = main([
+        "--database-url",
+        f"sqlite:///{db_path}",
+        "import-addon",
+        "--saved-variables",
+        str(saved_variables),
+    ])
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "1 owned auction rows, 1 mail rows" in captured

@@ -27,8 +27,10 @@ def fetch_and_store(
     config: TrackerConfig,
     client: BlizzardClient,
     repository: AuctionRepository,
+    *,
+    expected_interval_seconds: int | None = None,
 ) -> FetchResult:
-    fetch_run_id = repository.start_fetch_run(config)
+    fetch_run_id = repository.start_fetch_run(config, expected_interval_seconds=expected_interval_seconds)
 
     try:
         metadata_items = _fetch_missing_item_metadata(config, client, repository)

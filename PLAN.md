@@ -55,7 +55,7 @@ snapshots into useful pricing and demand signals for tracked items.
   - Document cron/systemd-style external scheduler options for periodic
     `wow-auctions fetch`.
 
-- [ ] Add scheduler safety metadata.
+- [x] Add scheduler safety metadata.
   - Add safeguards to avoid overlapping fetch runs.
   - Record expected snapshot interval for inference calculations.
 
@@ -66,12 +66,12 @@ snapshots into useful pricing and demand signals for tracked items.
   - Record auction-related mailbox rows for sale/expiry/cancel signals.
   - Store data in `WowAuctionTrackerDB` SavedVariables.
 
-- [ ] Import companion addon SavedVariables.
+- [x] Import companion addon SavedVariables.
   - Parse `WowAuctionTracker.lua`.
   - Store player auction posts and outcomes in SQLite.
   - Preserve raw addon rows for classifier improvements.
 
-- [ ] Blend player auction outcomes into recommendations.
+- [x] Blend player auction outcomes into recommendations.
   - Track character-specific sale rate, time to sale, expired rate, and net
     proceeds.
   - Prefer real player outcomes over inferred market sell-through when enough

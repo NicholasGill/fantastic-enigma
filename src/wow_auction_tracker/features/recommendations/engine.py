@@ -28,6 +28,12 @@ class RecommendationInputs:
     recent_quantity_drop_ratio: float
     average_sell_through_ratio: float
     average_sell_through_confidence: int
+    player_post_count: int
+    player_sold_count: int
+    player_expired_count: int
+    player_cancelled_count: int
+    player_sale_rate: float
+    average_player_net_proceeds: int | None
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,12 @@ class Recommendation:
     estimated_demand_score: int
     average_sell_through_ratio: float
     average_sell_through_confidence: int
+    player_post_count: int
+    player_sold_count: int
+    player_expired_count: int
+    player_cancelled_count: int
+    player_sale_rate: float
+    average_player_net_proceeds: int | None
     reasons: list[str]
 
 
@@ -133,6 +145,7 @@ class RecommendationEngine:
             int(item_row["item_id"]),
             self.lookback_runs,
         )
+        player_outcomes = _load_player_outcome_inputs(connection, int(item_row["item_id"]))
 
         return RecommendationInputs(
             item_id=int(item_row["item_id"]),
@@ -154,6 +167,12 @@ class RecommendationEngine:
             recent_quantity_drop_ratio=_recent_drop_ratio(quantities),
             average_sell_through_ratio=sell_through[0],
             average_sell_through_confidence=sell_through[1],
+            player_post_count=player_outcomes["post_count"],
+            player_sold_count=player_outcomes["sold_count"],
+            player_expired_count=player_outcomes["expired_count"],
+            player_cancelled_count=player_outcomes["cancelled_count"],
+            player_sale_rate=player_outcomes["sale_rate"],
+            average_player_net_proceeds=player_outcomes["average_net_proceeds"],
         )
 
     def _score(self, inputs: RecommendationInputs) -> Recommendation:
@@ -175,6 +194,12 @@ class RecommendationEngine:
                 estimated_demand_score=0,
                 average_sell_through_ratio=inputs.average_sell_through_ratio,
                 average_sell_through_confidence=inputs.average_sell_through_confidence,
+                player_post_count=inputs.player_post_count,
+                player_sold_count=inputs.player_sold_count,
+                player_expired_count=inputs.player_expired_count,
+                player_cancelled_count=inputs.player_cancelled_count,
+                player_sale_rate=inputs.player_sale_rate,
+                average_player_net_proceeds=inputs.average_player_net_proceeds,
                 reasons=[f"needs at least {self.min_snapshots} snapshots"],
             )
 
@@ -185,6 +210,10 @@ class RecommendationEngine:
         confidence = _confidence(inputs.snapshots, self.lookback_runs)
         if inputs.average_sell_through_confidence > 0:
             confidence = round((confidence * 0.75) + (inputs.average_sell_through_confidence * 0.25))
+        player_confidence = _player_outcome_confidence(inputs.player_post_count)
+        if player_confidence > 0:
+            demand_score = _player_blended_demand_score(demand_score, inputs.player_sale_rate, player_confidence)
+            confidence = max(confidence, player_confidence)
         score = round((price_score * 0.45) + (demand_score * 0.25) + (scarcity_score * 0.15) + (confidence * 0.15))
         action = _action_for_score(score)
 
@@ -205,6 +234,12 @@ class RecommendationEngine:
             estimated_demand_score=max(0, min(demand_score, 100)),
             average_sell_through_ratio=inputs.average_sell_through_ratio,
             average_sell_through_confidence=inputs.average_sell_through_confidence,
+            player_post_count=inputs.player_post_count,
+            player_sold_count=inputs.player_sold_count,
+            player_expired_count=inputs.player_expired_count,
+            player_cancelled_count=inputs.player_cancelled_count,
+            player_sale_rate=inputs.player_sale_rate,
+            average_player_net_proceeds=inputs.average_player_net_proceeds,
             reasons=_reasons(inputs, price_score, scarcity_score, demand_score),
         )
 
@@ -227,6 +262,12 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "estimated_demand_score": recommendation.estimated_demand_score,
         "average_sell_through_ratio": recommendation.average_sell_through_ratio,
         "average_sell_through_confidence": recommendation.average_sell_through_confidence,
+        "player_post_count": recommendation.player_post_count,
+        "player_sold_count": recommendation.player_sold_count,
+        "player_expired_count": recommendation.player_expired_count,
+        "player_cancelled_count": recommendation.player_cancelled_count,
+        "player_sale_rate": recommendation.player_sale_rate,
+        "average_player_net_proceeds": recommendation.average_player_net_proceeds,
         "reasons": recommendation.reasons,
     }
 
@@ -298,6 +339,53 @@ def _load_sell_through_inputs(
     )
 
 
+def _load_player_outcome_inputs(connection: sqlite3.Connection, item_id: int) -> dict[str, Any]:
+    if not _table_exists(connection, "player_auction_outcomes"):
+        return _empty_player_outcomes()
+
+    outcome_rows = connection.execute(
+        """
+        select outcome, money
+        from player_auction_outcomes
+        where item_id = ?
+        """,
+        (item_id,),
+    ).fetchall()
+    post_count = 0
+    if _table_exists(connection, "player_auction_posts"):
+        post_count = int(connection.execute(
+            "select count(*) from player_auction_posts where item_id = ?",
+            (item_id,),
+        ).fetchone()[0])
+
+    sold_count = sum(1 for row in outcome_rows if row["outcome"] == "sold")
+    expired_count = sum(1 for row in outcome_rows if row["outcome"] == "expired")
+    cancelled_count = sum(1 for row in outcome_rows if row["outcome"] == "cancelled")
+    known_outcomes = sold_count + expired_count + cancelled_count
+    net_proceeds = [int(row["money"]) for row in outcome_rows if row["outcome"] == "sold" and row["money"] is not None]
+    denominator = post_count if post_count > 0 else known_outcomes
+    sale_rate = sold_count / denominator if denominator > 0 else 0.0
+    return {
+        "post_count": post_count,
+        "sold_count": sold_count,
+        "expired_count": expired_count,
+        "cancelled_count": cancelled_count,
+        "sale_rate": sale_rate,
+        "average_net_proceeds": int(mean(net_proceeds)) if net_proceeds else None,
+    }
+
+
+def _empty_player_outcomes() -> dict[str, Any]:
+    return {
+        "post_count": 0,
+        "sold_count": 0,
+        "expired_count": 0,
+        "cancelled_count": 0,
+        "sale_rate": 0.0,
+        "average_net_proceeds": None,
+    }
+
+
 def _scarcity_score(latest_listing_count: int, average_listing_count: float) -> int:
     if average_listing_count <= 0:
         return 0
@@ -323,6 +411,16 @@ def _demand_score(recent_quantity_drop_ratio: float, average_sell_through_ratio:
     return round(max(quantity_drop_score, (quantity_drop_score * 0.35) + (sell_through_score * 0.65)))
 
 
+def _player_outcome_confidence(post_count: int) -> int:
+    return round(max(0.0, min(post_count / 10, 1.0)) * 100)
+
+
+def _player_blended_demand_score(inferred_demand_score: int, player_sale_rate: float, confidence: int) -> int:
+    player_score = round(max(0.0, min(player_sale_rate, 1.0)) * 100)
+    player_weight = max(0.0, min(confidence / 100, 1.0))
+    return round((inferred_demand_score * (1 - player_weight)) + (player_score * player_weight))
+
+
 def _confidence(snapshot_count: int, lookback_runs: int) -> int:
     return round(max(0.0, min(snapshot_count / lookback_runs, 1.0)) * 100)
 
@@ -345,10 +443,17 @@ def _reasons(
     if price_score > 0:
         reasons.append(f"lowest listing is {price_score}% below recent median")
     if demand_score > 0:
-        if inputs.average_sell_through_ratio > 0:
+        if inputs.player_post_count > 0:
+            reasons.append(
+                f"personal sale rate is {round(inputs.player_sale_rate * 100)}% "
+                f"across {inputs.player_post_count} posts"
+            )
+        elif inputs.average_sell_through_ratio > 0:
             reasons.append(f"inferred sell-through is {round(inputs.average_sell_through_ratio * 100)}%")
         else:
             reasons.append(f"recent listed quantity dropped by an estimated {demand_score}%")
+    if inputs.average_player_net_proceeds is not None:
+        reasons.append(f"average personal sale proceeds are {inputs.average_player_net_proceeds / 10000:.2f}g")
     if scarcity_score > 0:
         reasons.append(f"listing count is {scarcity_score}% below recent average")
     if inputs.snapshots > 0:

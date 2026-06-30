@@ -9,10 +9,13 @@ from wow_auction_tracker.features.sellthrough import build_sell_through_metrics
 from wow_auction_tracker.storage import (
     AuctionListingRecord,
     AuctionRepository,
+    FetchRun,
     ItemHistoryMetricRecord,
     ItemMetadataRecord,
     ItemSummaryRecord,
     ListingObservationRecord,
+    PlayerAuctionOutcomeRecord,
+    PlayerAuctionPostRecord,
     SellThroughMetricRecord,
     TrackedItemRecord,
     create_db_engine,
@@ -206,3 +209,83 @@ def test_repository_stores_sell_through_metrics() -> None:
     assert len(metrics) == 1
     assert metrics[0].disappeared_quantity == 2
     assert metrics[0].sell_through_ratio_bps == 10000
+
+
+def test_repository_blocks_overlapping_fetch_runs_and_records_interval() -> None:
+    engine = create_db_engine("sqlite:///:memory:")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+
+    run_id = repository.start_fetch_run(config, expected_interval_seconds=1800)
+
+    try:
+        repository.start_fetch_run(config)
+    except RuntimeError as exc:
+        assert f"fetch run {run_id} is already running" in str(exc)
+    else:
+        raise AssertionError("overlapping fetch run was allowed")
+
+    repository.complete_fetch_run(run_id, [], [])
+    with Session(engine) as session:
+        stored_run = session.get(FetchRun, run_id)
+
+    assert stored_run is not None
+    assert stored_run.expected_interval_seconds == 1800
+
+
+def test_repository_imports_player_addon_rows(tmp_path) -> None:
+    from wow_auction_tracker.features.player import import_saved_variables
+
+    saved_variables = tmp_path / "WowAuctionTracker.lua"
+    saved_variables.write_text(
+        """
+        WowAuctionTrackerDB = {
+          ["version"] = 1,
+          ["owned_snapshots"] = {
+            {
+              ["observed_at"] = 1710000000,
+              ["snapshot_id"] = "Alice-1710000000",
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["auction_id"] = 42,
+              ["item_id"] = 210930,
+              ["quantity"] = 5,
+              ["unit_price"] = 10000,
+            },
+          },
+          ["mail_events"] = {
+            {
+              ["observed_at"] = 1710000300,
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["mail_index"] = 1,
+              ["outcome"] = "sold",
+              ["money"] = 45000,
+              ["first_item_name"] = "Bismuth",
+              ["first_item_id"] = 210930,
+              ["first_item_count"] = 5,
+            },
+          },
+        }
+        """,
+        encoding="utf-8",
+    )
+    engine = create_db_engine("sqlite:///:memory:")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+
+    import_id = repository.import_addon_data(import_saved_variables(saved_variables))
+
+    with Session(engine) as session:
+        posts = session.scalars(select(PlayerAuctionPostRecord)).all()
+        outcomes = session.scalars(select(PlayerAuctionOutcomeRecord)).all()
+
+    assert import_id == 1
+    assert len(posts) == 1
+    assert posts[0].item_id == 210930
+    assert len(outcomes) == 1
+    assert outcomes[0].outcome == "sold"
+    assert outcomes[0].money == 45000

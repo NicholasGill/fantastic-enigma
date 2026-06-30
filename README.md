@@ -96,6 +96,13 @@ Show current item recommendations from stored snapshot history:
 uv run wow-auctions recommend --limit 10
 ```
 
+Import companion addon SavedVariables after copying or pointing at the game
+file:
+
+```bash
+uv run wow-auctions import-addon --saved-variables "/path/to/WowAuctionTracker.lua"
+```
+
 Print the latest stored item summaries:
 
 ```bash
@@ -118,8 +125,10 @@ uv run wow-auctions export recommendations --limit 10
 
 Recommendations are conservative estimates based on current price versus recent
 median price, inferred sell-through, recent quantity drops, listing scarcity,
-and snapshot count. They are not confirmed sales because Blizzard's auction APIs
-expose current listings, not completed purchases.
+snapshot count, and imported player auction outcomes when available. Blizzard's
+auction APIs expose current listings, not completed purchases, so imported
+personal sale and expiry signals are preferred over inferred market
+sell-through once enough personal history exists.
 
 Recommendation output includes a recommended sell price. This is a conservative
 target based on recent average first-quartile unit price when available, falling
@@ -143,8 +152,10 @@ The addon records owned-auction snapshots and auction-related mailbox rows to:
 World of Warcraft/_retail_/WTF/Account/<ACCOUNT>/SavedVariables/WowAuctionTracker.lua
 ```
 
-SavedVariables are written after `/reload`, logout, or game exit. A Python
-import command for this file is planned next.
+SavedVariables are written after `/reload`, logout, or game exit. Import them
+with `uv run wow-auctions import-addon --saved-variables ...` to store owned
+auction posts, mailbox sale/expiry/cancel outcomes, and the raw addon rows in
+SQLite.
 
 ## Project Layout
 

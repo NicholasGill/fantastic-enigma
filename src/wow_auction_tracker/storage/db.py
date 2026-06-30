@@ -23,6 +23,7 @@ from wow_auction_tracker.auction import AuctionListing, ItemHistoryMetric, ItemS
 from wow_auction_tracker.config import Market, TrackerConfig, TrackedItem
 from wow_auction_tracker.features.lifecycle import ListingObservation, ListingSnapshot, listing_key_from_parts
 from wow_auction_tracker.features.metadata import ItemMetadata
+from wow_auction_tracker.features.player import AddonImportResult, PlayerAuctionOutcome, PlayerAuctionPost
 from wow_auction_tracker.features.sellthrough import SellThroughMetric
 
 
@@ -39,6 +40,7 @@ class FetchRun(Base):
     region: Mapped[str] = mapped_column(String(16), nullable=False)
     locale: Mapped[str] = mapped_column(String(16), nullable=False)
     connected_realm_id: Mapped[int | None] = mapped_column(Integer)
+    expected_interval_seconds: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
 
@@ -47,6 +49,20 @@ class FetchRun(Base):
     history_metrics: Mapped[list[ItemHistoryMetricRecord]] = relationship(back_populates="fetch_run")
     listing_observations: Mapped[list[ListingObservationRecord]] = relationship(back_populates="fetch_run")
     sell_through_metrics: Mapped[list[SellThroughMetricRecord]] = relationship(back_populates="fetch_run")
+
+
+class AddonImportRecord(Base):
+    __tablename__ = "addon_imports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    source_path: Mapped[str] = mapped_column(Text, nullable=False)
+    addon_version: Mapped[int | None] = mapped_column(Integer)
+    owned_snapshot_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    mail_event_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    posts: Mapped[list[PlayerAuctionPostRecord]] = relationship(back_populates="import_record")
+    outcomes: Mapped[list[PlayerAuctionOutcomeRecord]] = relationship(back_populates="import_record")
 
 
 class TrackedItemRecord(Base):
@@ -174,6 +190,48 @@ class SellThroughMetricRecord(Base):
     fetch_run: Mapped[FetchRun] = relationship(back_populates="sell_through_metrics")
 
 
+class PlayerAuctionPostRecord(Base):
+    __tablename__ = "player_auction_posts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    addon_import_id: Mapped[int] = mapped_column(ForeignKey("addon_imports.id"), nullable=False, index=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    snapshot_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    reason: Mapped[str | None] = mapped_column(String(64))
+    character: Mapped[str | None] = mapped_column(String(128), index=True)
+    realm: Mapped[str | None] = mapped_column(String(128), index=True)
+    auction_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    item_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    quantity: Mapped[int | None] = mapped_column(Integer)
+    unit_price: Mapped[int | None] = mapped_column(Integer)
+    buyout: Mapped[int | None] = mapped_column(Integer)
+    bid_amount: Mapped[int | None] = mapped_column(Integer)
+    time_left_seconds: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str | None] = mapped_column(String(64))
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    import_record: Mapped[AddonImportRecord] = relationship(back_populates="posts")
+
+
+class PlayerAuctionOutcomeRecord(Base):
+    __tablename__ = "player_auction_outcomes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    addon_import_id: Mapped[int] = mapped_column(ForeignKey("addon_imports.id"), nullable=False, index=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    character: Mapped[str | None] = mapped_column(String(128), index=True)
+    realm: Mapped[str | None] = mapped_column(String(128), index=True)
+    mail_index: Mapped[int | None] = mapped_column(Integer)
+    item_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    item_name: Mapped[str | None] = mapped_column(String(255))
+    item_count: Mapped[int | None] = mapped_column(Integer)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    money: Mapped[int | None] = mapped_column(Integer)
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    import_record: Mapped[AddonImportRecord] = relationship(back_populates="outcomes")
+
+
 def create_db_engine(database_url: str) -> Engine:
     if database_url.startswith("sqlite:///"):
         db_path = Path(database_url.removeprefix("sqlite:///"))
@@ -192,14 +250,19 @@ class AuctionRepository:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
-    def start_fetch_run(self, config: TrackerConfig) -> int:
+    def start_fetch_run(self, config: TrackerConfig, *, expected_interval_seconds: int | None = None) -> int:
         with Session(self.engine) as session:
+            running_id = session.scalar(select(FetchRun.id).where(FetchRun.status == "running").limit(1))
+            if running_id is not None:
+                raise RuntimeError(f"fetch run {running_id} is already running")
+
             self._upsert_tracked_items(session, config.items)
             run = FetchRun(
                 started_at=datetime.now(UTC),
                 region=config.region,
                 locale=config.locale,
                 connected_realm_id=config.connected_realm_id,
+                expected_interval_seconds=expected_interval_seconds,
                 status="running",
             )
             session.add(run)
@@ -415,6 +478,59 @@ class AuctionRepository:
                 record.updated_at = now
             session.commit()
 
+    def import_addon_data(self, result: AddonImportResult) -> int:
+        with Session(self.engine) as session:
+            import_record = AddonImportRecord(
+                imported_at=datetime.now(UTC),
+                source_path=str(result.source_path),
+                addon_version=result.addon_version,
+                owned_snapshot_count=len(result.posts),
+                mail_event_count=len(result.outcomes),
+            )
+            session.add(import_record)
+            session.flush()
+
+            for post in result.posts:
+                session.add(
+                    PlayerAuctionPostRecord(
+                        addon_import_id=import_record.id,
+                        observed_at=post.observed_at,
+                        snapshot_id=post.snapshot_id,
+                        reason=post.reason,
+                        character=post.character,
+                        realm=post.realm,
+                        auction_id=post.auction_id,
+                        item_id=post.item_id,
+                        quantity=post.quantity,
+                        unit_price=post.unit_price,
+                        buyout=post.buyout,
+                        bid_amount=post.bid_amount,
+                        time_left_seconds=post.time_left_seconds,
+                        status=post.status,
+                        raw_json=json.dumps(post.raw, sort_keys=True),
+                    )
+                )
+
+            for outcome in result.outcomes:
+                session.add(
+                    PlayerAuctionOutcomeRecord(
+                        addon_import_id=import_record.id,
+                        observed_at=outcome.observed_at,
+                        character=outcome.character,
+                        realm=outcome.realm,
+                        mail_index=outcome.mail_index,
+                        item_id=outcome.item_id,
+                        item_name=outcome.item_name,
+                        item_count=outcome.item_count,
+                        outcome=outcome.outcome,
+                        money=outcome.money,
+                        raw_json=json.dumps(outcome.raw, sort_keys=True),
+                    )
+                )
+
+            session.commit()
+            return import_record.id
+
     @staticmethod
     def _upsert_tracked_items(session: Session, items: Iterable[TrackedItem]) -> None:
         now = datetime.now(UTC)
@@ -434,6 +550,13 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
         return
 
     with engine.begin() as connection:
+        _ensure_sqlite_columns(
+            connection,
+            "fetch_runs",
+            {
+                "expected_interval_seconds": "integer",
+            },
+        )
         _ensure_sqlite_columns(
             connection,
             "item_summaries",
@@ -474,6 +597,76 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
         connection.exec_driver_sql(
             "create index if not exists ix_sell_through_metrics_item_id on sell_through_metrics (item_id)"
         )
+        connection.exec_driver_sql(
+            """
+            create table if not exists addon_imports (
+                id integer primary key,
+                imported_at datetime not null,
+                source_path text not null,
+                addon_version integer,
+                owned_snapshot_count integer not null,
+                mail_event_count integer not null
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            create table if not exists player_auction_posts (
+                id integer primary key,
+                addon_import_id integer not null,
+                observed_at datetime,
+                snapshot_id varchar(128),
+                reason varchar(64),
+                character varchar(128),
+                realm varchar(128),
+                auction_id integer,
+                item_id integer,
+                quantity integer,
+                unit_price integer,
+                buyout integer,
+                bid_amount integer,
+                time_left_seconds integer,
+                status varchar(64),
+                raw_json text not null,
+                foreign key(addon_import_id) references addon_imports (id)
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            create table if not exists player_auction_outcomes (
+                id integer primary key,
+                addon_import_id integer not null,
+                observed_at datetime,
+                character varchar(128),
+                realm varchar(128),
+                mail_index integer,
+                item_id integer,
+                item_name varchar(255),
+                item_count integer,
+                outcome varchar(32) not null,
+                money integer,
+                raw_json text not null,
+                foreign key(addon_import_id) references addon_imports (id)
+            )
+            """
+        )
+        for table, column in (
+            ("player_auction_posts", "addon_import_id"),
+            ("player_auction_posts", "observed_at"),
+            ("player_auction_posts", "snapshot_id"),
+            ("player_auction_posts", "character"),
+            ("player_auction_posts", "realm"),
+            ("player_auction_posts", "auction_id"),
+            ("player_auction_posts", "item_id"),
+            ("player_auction_outcomes", "addon_import_id"),
+            ("player_auction_outcomes", "observed_at"),
+            ("player_auction_outcomes", "character"),
+            ("player_auction_outcomes", "realm"),
+            ("player_auction_outcomes", "item_id"),
+            ("player_auction_outcomes", "outcome"),
+        ):
+            connection.exec_driver_sql(f"create index if not exists ix_{table}_{column} on {table} ({column})")
 
 
 def _ensure_sqlite_columns(connection: Connection, table_name: str, columns: dict[str, str]) -> None:
