@@ -465,6 +465,28 @@ DASHBOARD_HTML = """<!doctype html>
       letter-spacing: .03em;
       z-index: 2;
     }
+    .column-help {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      margin-left: 4px;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      color: var(--muted);
+      background: var(--surface);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+      text-transform: none;
+      cursor: help;
+      vertical-align: middle;
+    }
+    .column-help:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
     td:first-child, th:first-child { text-align: left; }
     .item-cell {
       display: inline-flex;
@@ -622,18 +644,18 @@ DASHBOARD_HTML = """<!doctype html>
           <table>
             <thead>
               <tr>
-                <th>Item</th>
-                <th>ID</th>
-                <th>Listings</th>
-                <th>Quantity</th>
-                <th>Min</th>
-                <th>Q1</th>
-                <th>Median</th>
-                <th>Q3</th>
-                <th>Buy At</th>
-                <th>Sell At</th>
-                <th>Sell-through</th>
-                <th>Min Change</th>
+                <th>Item<span class="column-help" tabindex="0" title="Tracked auction item name and Blizzard item class." aria-label="Tracked auction item name and Blizzard item class.">?</span></th>
+                <th>ID<span class="column-help" tabindex="0" title="Blizzard item ID from the configured tracked item list." aria-label="Blizzard item ID from the configured tracked item list.">?</span></th>
+                <th>Listings<span class="column-help" tabindex="0" title="Number of active auction listings found for this item in the latest snapshot." aria-label="Number of active auction listings found for this item in the latest snapshot.">?</span></th>
+                <th>Quantity<span class="column-help" tabindex="0" title="Total quantity available across latest active listings for this item." aria-label="Total quantity available across latest active listings for this item.">?</span></th>
+                <th>Min<span class="column-help" tabindex="0" title="Lowest unit price currently listed in the latest snapshot." aria-label="Lowest unit price currently listed in the latest snapshot.">?</span></th>
+                <th>Q1<span class="column-help" tabindex="0" title="First quartile unit price from the latest snapshot; useful as a conservative market price." aria-label="First quartile unit price from the latest snapshot; useful as a conservative market price.">?</span></th>
+                <th>Median<span class="column-help" tabindex="0" title="Median unit price from the latest snapshot." aria-label="Median unit price from the latest snapshot.">?</span></th>
+                <th>Q3<span class="column-help" tabindex="0" title="Third quartile unit price from the latest snapshot; helps show the upper typical price band." aria-label="Third quartile unit price from the latest snapshot; helps show the upper typical price band.">?</span></th>
+                <th>Buy At<span class="column-help" tabindex="0" title="Recommended maximum buy price, targeting margin against the conservative sell price." aria-label="Recommended maximum buy price, targeting margin against the conservative sell price.">?</span></th>
+                <th>Sell At<span class="column-help" tabindex="0" title="Recommended conservative sell price, preferring recent first-quartile pricing and falling back to median pricing." aria-label="Recommended conservative sell price, preferring recent first-quartile pricing and falling back to median pricing.">?</span></th>
+                <th>Sell-through<span class="column-help" tabindex="0" title="Estimated demand signal from recent disappeared listings; this is inferred and not confirmed sales." aria-label="Estimated demand signal from recent disappeared listings; this is inferred and not confirmed sales.">?</span></th>
+                <th>Min Change<span class="column-help" tabindex="0" title="Change from the latest minimum price to the last different previous minimum price." aria-label="Change from the latest minimum price to the last different previous minimum price.">?</span></th>
               </tr>
             </thead>
             <tbody id="items"></tbody>
