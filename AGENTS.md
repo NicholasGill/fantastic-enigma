@@ -11,6 +11,7 @@ auction item configuration lives under `config`.
 - `config/items.example.yaml` for the committed starter item map.
 - `config/items.yaml` for the ignored local item map used by commands.
 - `assets/` for static data, images, or sample auction inputs.
+- `addons/` for optional in-game companion addons.
 - `docs/` for design notes and longer contributor documentation.
 
 Keep generated outputs, local caches, dependency folders, and secrets out of version control.
@@ -26,11 +27,29 @@ Use `uv` for dependency management and command execution.
   `http://127.0.0.1:8000`.
 - `uv run wow-auctions recommend --limit 10`: show snapshot-derived item
   recommendations.
+- `uv run wow-auctions report latest --limit 10`: print the latest item
+  summaries.
+- `uv run wow-auctions report item --item-id 210930`: print one item's snapshot
+  history.
+- `uv run wow-auctions export latest --output latest.csv`: export the latest
+  item summaries to CSV.
 - `uv run wow-auctions schedule --interval-minutes 30`: fetch snapshots on a
   fixed interval.
 - `uv run --extra dev pytest`: run the full test suite.
 
 Before opening a pull request, run every command that applies to the files you changed.
+
+Sell-through metrics are inferred from disappeared listings between snapshots.
+Treat them as estimated demand signals, not confirmed sales.
+
+Price presentation should prefer first quartile, median, and third quartile
+fields when available so extreme listings do not dominate charts.
+
+Recommended sell price should stay conservative: prefer recent average first
+quartile pricing and fall back to median pricing when quartiles are unavailable.
+
+The companion addon under `addons/WowAuctionTracker` records SavedVariables only.
+Keep it minimal and avoid dependencies on third-party addon internals.
 
 ## Coding Style & Naming Conventions
 

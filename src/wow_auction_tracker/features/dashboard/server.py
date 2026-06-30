@@ -77,9 +77,16 @@ class DashboardDataStore:
                     s.listing_count,
                     s.total_quantity,
                     s.min_unit_price,
-                    s.median_unit_price
+                    s.median_unit_price,
+                    s.first_quartile_unit_price,
+                    s.third_quartile_unit_price,
+                    st.sell_through_ratio_bps,
+                    st.disappeared_quantity,
+                    st.disappeared_value,
+                    st.confidence as sell_through_confidence
                 from item_summaries s
                 join fetch_runs r on r.id = s.fetch_run_id
+                left join sell_through_metrics st on st.fetch_run_id = s.fetch_run_id and st.item_id = s.item_id
                 where s.item_id = ?
                 order by r.id
                 """,
@@ -115,6 +122,7 @@ class DashboardDataStore:
             "item_summaries",
             "item_history_metrics",
             "listing_observations",
+            "sell_through_metrics",
         )
         return {
             table: int(connection.execute(f"select count(*) from {table}").fetchone()[0])
@@ -182,11 +190,18 @@ class DashboardDataStore:
                 s.total_quantity,
                 s.min_unit_price,
                 s.median_unit_price,
+                s.first_quartile_unit_price,
+                s.third_quartile_unit_price,
+                st.sell_through_ratio_bps,
+                st.disappeared_quantity,
+                st.disappeared_value,
+                st.confidence as sell_through_confidence,
                 p.min_unit_price as previous_min_unit_price,
                 p.median_unit_price as previous_median_unit_price
             from item_summaries s
             left join tracked_items t on t.item_id = s.item_id
             left join item_metadata m on m.item_id = s.item_id
+            left join sell_through_metrics st on st.fetch_run_id = s.fetch_run_id and st.item_id = s.item_id
             left join item_summaries p on p.item_id = s.item_id and p.fetch_run_id = ?
             where s.fetch_run_id = ?
             order by s.min_unit_price is null, s.min_unit_price, s.item_id
@@ -573,7 +588,10 @@ DASHBOARD_HTML = """<!doctype html>
                 <th>Listings</th>
                 <th>Quantity</th>
                 <th>Min</th>
+                <th>Q1</th>
                 <th>Median</th>
+                <th>Q3</th>
+                <th>Sell-through</th>
                 <th>Min Change</th>
               </tr>
             </thead>
@@ -632,6 +650,11 @@ DASHBOARD_HTML = """<!doctype html>
       return Number(value || 0).toLocaleString();
     }
 
+    function bps(value) {
+      if (value === null || value === undefined) return '-';
+      return `${(value / 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
+    }
+
     function shortTime(value) {
       if (!value) return '-';
       return new Date(value.replace(' ', 'T') + 'Z').toLocaleString();
@@ -686,7 +709,10 @@ DASHBOARD_HTML = """<!doctype html>
           <td>${integer(item.listing_count)}</td>
           <td>${integer(item.total_quantity)}</td>
           <td>${gold(item.min_unit_price)}</td>
+          <td>${gold(item.first_quartile_unit_price)}</td>
           <td>${gold(item.median_unit_price)}</td>
+          <td>${gold(item.third_quartile_unit_price)}</td>
+          <td>${bps(item.sell_through_ratio_bps)}</td>
           <td class="${change.cls}">${change.text}</td>
         </tr>`;
       }).join('');
@@ -719,7 +745,7 @@ DASHBOARD_HTML = """<!doctype html>
             <strong title="${item.name}">${item.name}</strong>
             <span class="score">${item.score}</span>
           </div>
-          <div class="reasons">${gold(item.latest_min_unit_price)} min, ${gold(item.average_weighted_unit_price || item.average_median_unit_price)} avg, ${item.confidence}% confidence</div>
+          <div class="reasons">${gold(item.latest_min_unit_price)} min, ${gold(item.recommended_sell_price)} sell, ${item.confidence}% confidence</div>
           <div class="reasons">${item.reasons.join('; ')}</div>
         </div>`;
       }).join('');
@@ -754,7 +780,11 @@ DASHBOARD_HTML = """<!doctype html>
       const pad = { left: 64, right: 18, top: 22, bottom: 42 };
       const width = canvas.width - pad.left - pad.right;
       const height = canvas.height - pad.top - pad.bottom;
-      const values = points.flatMap((row) => [row.min_unit_price, row.median_unit_price].filter(Boolean));
+      const values = points.flatMap((row) => [
+        row.first_quartile_unit_price,
+        row.median_unit_price,
+        row.third_quartile_unit_price
+      ].filter(Boolean));
       const min = Math.min(...values);
       const max = Math.max(...values);
       const spread = Math.max(max - min, 1);
@@ -775,25 +805,33 @@ DASHBOARD_HTML = """<!doctype html>
       ctx.fillText(gold(max), 8, pad.top + 4);
       ctx.fillText(gold(min), 8, pad.top + height);
 
-      drawLine(ctx, points, x, y, 'min_unit_price', '#176b87');
+      drawLine(ctx, points, x, y, 'first_quartile_unit_price', '#176b87');
       drawLine(ctx, points, x, y, 'median_unit_price', '#8a5a1f');
+      drawLine(ctx, points, x, y, 'third_quartile_unit_price', '#476f3f');
       ctx.fillStyle = '#176b87';
-      ctx.fillText('Min', pad.left, canvas.height - 14);
+      ctx.fillText('Q1', pad.left, canvas.height - 14);
       ctx.fillStyle = '#8a5a1f';
       ctx.fillText('Median', pad.left + 46, canvas.height - 14);
+      ctx.fillStyle = '#476f3f';
+      ctx.fillText('Q3', pad.left + 112, canvas.height - 14);
     }
 
     function drawLine(ctx, points, x, y, key, color) {
       ctx.strokeStyle = color;
       ctx.lineWidth = 3;
       ctx.beginPath();
+      let started = false;
       points.forEach((point, index) => {
+        if (point[key] === null || point[key] === undefined) return;
         const px = x(index);
         const py = y(point[key]);
-        if (index === 0) ctx.moveTo(px, py);
+        if (!started) {
+          ctx.moveTo(px, py);
+          started = true;
+        }
         else ctx.lineTo(px, py);
       });
-      ctx.stroke();
+      if (started) ctx.stroke();
     }
 
     els.refresh.addEventListener('click', loadOverview);

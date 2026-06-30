@@ -55,6 +55,8 @@ def test_dashboard_overview_returns_latest_counts_and_items(tmp_path: Path) -> N
     assert payload["latest_run"]["id"] == second_run_id
     assert payload["items"][0]["name"] == "Bismuth"
     assert payload["items"][0]["min_unit_price"] == 15000
+    assert payload["items"][0]["first_quartile_unit_price"] == 15000
+    assert payload["items"][0]["third_quartile_unit_price"] == 15000
     assert payload["items"][0]["previous_min_unit_price"] == 20000
 
 
@@ -86,6 +88,7 @@ def test_dashboard_item_history_returns_rows_in_fetch_order(tmp_path: Path) -> N
 
     assert payload["item"]["name"] == "Bismuth"
     assert [row["fetch_run_id"] for row in payload["history"]] == [run_id]
+    assert payload["history"][0]["first_quartile_unit_price"] == 20000
 
 
 def test_format_file_size() -> None:

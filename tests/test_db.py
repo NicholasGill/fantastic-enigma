@@ -5,6 +5,7 @@ from wow_auction_tracker.auction import calculate_item_history_metrics, filter_a
 from wow_auction_tracker.config import Market, TrackerConfig
 from wow_auction_tracker.features.lifecycle import build_listing_observations
 from wow_auction_tracker.features.metadata import ItemMetadata
+from wow_auction_tracker.features.sellthrough import build_sell_through_metrics
 from wow_auction_tracker.storage import (
     AuctionListingRecord,
     AuctionRepository,
@@ -12,6 +13,7 @@ from wow_auction_tracker.storage import (
     ItemMetadataRecord,
     ItemSummaryRecord,
     ListingObservationRecord,
+    SellThroughMetricRecord,
     TrackedItemRecord,
     create_db_engine,
     init_db,
@@ -62,6 +64,8 @@ def test_repository_stores_fetch_run_listings_and_summaries() -> None:
     loaded_summaries = repository.list_summaries(run_id)
     assert loaded_summaries[0].item_id == 19019
     assert loaded_summaries[0].min_unit_price == 9000000
+    assert loaded_summaries[0].first_quartile_unit_price == 9000000
+    assert loaded_summaries[0].third_quartile_unit_price == 9000000
 
 
 def test_repository_stores_item_history_metrics() -> None:
@@ -94,6 +98,8 @@ def test_repository_stores_item_history_metrics() -> None:
         stored_metrics = session.scalars(select(ItemHistoryMetricRecord)).all()
 
     assert len(stored_metrics) == 1
+    assert stored_metrics[0].first_quartile_unit_price == 100
+    assert stored_metrics[0].third_quartile_unit_price == 300
     assert stored_metrics[0].weighted_average_unit_price == 260
 
 
@@ -160,3 +166,43 @@ def test_repository_stores_listing_observations() -> None:
 
     assert len(observations) == 1
     assert observations[0].status == "new"
+
+
+def test_repository_stores_sell_through_metrics() -> None:
+    engine = create_db_engine("sqlite:///:memory:")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+    first_run_id = repository.start_fetch_run(config)
+    first_listings = filter_auctions(
+        {"auctions": [{"id": 1, "item": {"id": 210930}, "quantity": 2, "unit_price": 100}]},
+        {210930},
+        Market.COMMODITY,
+    )
+    repository.complete_fetch_run(
+        first_run_id,
+        first_listings,
+        summarize_listings(first_listings),
+        calculate_item_history_metrics(first_listings),
+        build_listing_observations(first_listings, []),
+    )
+    second_run_id = repository.start_fetch_run(config)
+    observations = build_listing_observations([], repository.list_listing_snapshots(first_run_id))
+
+    repository.complete_fetch_run(
+        second_run_id,
+        [],
+        [],
+        (),
+        observations,
+        build_sell_through_metrics(observations),
+    )
+
+    with Session(engine) as session:
+        metrics = session.scalars(select(SellThroughMetricRecord)).all()
+
+    assert len(metrics) == 1
+    assert metrics[0].disappeared_quantity == 2
+    assert metrics[0].sell_through_ratio_bps == 10000

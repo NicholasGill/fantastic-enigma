@@ -53,9 +53,28 @@ def test_summarize_listings_uses_unit_price_or_buyout_per_unit() -> None:
     assert summaries[0].listing_count == 2
     assert summaries[0].total_quantity == 6
     assert summaries[0].min_unit_price == 100
+    assert summaries[0].first_quartile_unit_price == 100
     assert summaries[0].median_unit_price == 200
+    assert summaries[0].third_quartile_unit_price == 300
     assert summaries[1].item_id == 2
     assert summaries[1].min_unit_price == 200
+
+
+def test_summarize_listings_calculates_quartiles_for_middle_price_band() -> None:
+    payload = {
+        "auctions": [
+            {"id": 1, "item": {"id": 1}, "quantity": 1, "unit_price": 100},
+            {"id": 2, "item": {"id": 1}, "quantity": 1, "unit_price": 200},
+            {"id": 3, "item": {"id": 1}, "quantity": 1, "unit_price": 300},
+            {"id": 4, "item": {"id": 1}, "quantity": 1, "unit_price": 100000},
+        ]
+    }
+
+    summary = summarize_listings(filter_auctions(payload, {1}, Market.COMMODITY))[0]
+
+    assert summary.first_quartile_unit_price == 150
+    assert summary.median_unit_price == 250
+    assert summary.third_quartile_unit_price == 50150
 
 
 def test_calculate_item_history_metrics_tracks_weighted_average_and_lowest_quantity() -> None:
@@ -69,5 +88,7 @@ def test_calculate_item_history_metrics_tracks_weighted_average_and_lowest_quant
 
     metrics = calculate_item_history_metrics(filter_auctions(payload, {1}, Market.COMMODITY))
 
+    assert metrics[0].first_quartile_unit_price == 100
+    assert metrics[0].third_quartile_unit_price == 300
     assert metrics[0].weighted_average_unit_price == 206
     assert metrics[0].lowest_price_quantity == 7

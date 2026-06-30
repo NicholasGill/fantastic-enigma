@@ -16,13 +16,14 @@ from sqlalchemy import (
     create_engine,
     select,
 )
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
 from wow_auction_tracker.auction import AuctionListing, ItemHistoryMetric, ItemSummary
 from wow_auction_tracker.config import Market, TrackerConfig, TrackedItem
 from wow_auction_tracker.features.lifecycle import ListingObservation, ListingSnapshot, listing_key_from_parts
 from wow_auction_tracker.features.metadata import ItemMetadata
+from wow_auction_tracker.features.sellthrough import SellThroughMetric
 
 
 class Base(DeclarativeBase):
@@ -45,6 +46,7 @@ class FetchRun(Base):
     summaries: Mapped[list[ItemSummaryRecord]] = relationship(back_populates="fetch_run")
     history_metrics: Mapped[list[ItemHistoryMetricRecord]] = relationship(back_populates="fetch_run")
     listing_observations: Mapped[list[ListingObservationRecord]] = relationship(back_populates="fetch_run")
+    sell_through_metrics: Mapped[list[SellThroughMetricRecord]] = relationship(back_populates="fetch_run")
 
 
 class TrackedItemRecord(Base):
@@ -105,6 +107,8 @@ class ItemSummaryRecord(Base):
     total_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     min_unit_price: Mapped[int | None] = mapped_column(Integer)
     median_unit_price: Mapped[int | None] = mapped_column(Integer)
+    first_quartile_unit_price: Mapped[int | None] = mapped_column(Integer)
+    third_quartile_unit_price: Mapped[int | None] = mapped_column(Integer)
 
     fetch_run: Mapped[FetchRun] = relationship(back_populates="summaries")
 
@@ -120,6 +124,8 @@ class ItemHistoryMetricRecord(Base):
     total_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     min_unit_price: Mapped[int | None] = mapped_column(Integer)
     median_unit_price: Mapped[int | None] = mapped_column(Integer)
+    first_quartile_unit_price: Mapped[int | None] = mapped_column(Integer)
+    third_quartile_unit_price: Mapped[int | None] = mapped_column(Integer)
     weighted_average_unit_price: Mapped[int | None] = mapped_column(Integer)
     lowest_price_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
 
@@ -150,6 +156,24 @@ class ListingObservationRecord(Base):
     fetch_run: Mapped[FetchRun] = relationship(back_populates="listing_observations")
 
 
+class SellThroughMetricRecord(Base):
+    __tablename__ = "sell_through_metrics"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fetch_run_id: Mapped[int] = mapped_column(ForeignKey("fetch_runs.id"), nullable=False, index=True)
+    item_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    market: Mapped[str] = mapped_column(String(32), nullable=False)
+    disappeared_listing_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    disappeared_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    disappeared_value: Mapped[int | None] = mapped_column(Integer)
+    observed_listing_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    observed_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    sell_through_ratio_bps: Mapped[int] = mapped_column(Integer, nullable=False)
+    confidence: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    fetch_run: Mapped[FetchRun] = relationship(back_populates="sell_through_metrics")
+
+
 def create_db_engine(database_url: str) -> Engine:
     if database_url.startswith("sqlite:///"):
         db_path = Path(database_url.removeprefix("sqlite:///"))
@@ -161,6 +185,7 @@ def create_db_engine(database_url: str) -> Engine:
 
 def init_db(engine: Engine) -> None:
     Base.metadata.create_all(engine)
+    _ensure_sqlite_compatible_schema(engine)
 
 
 class AuctionRepository:
@@ -188,6 +213,7 @@ class AuctionRepository:
         summaries: Iterable[ItemSummary],
         history_metrics: Iterable[ItemHistoryMetric] = (),
         listing_observations: Iterable[ListingObservation] = (),
+        sell_through_metrics: Iterable[SellThroughMetric] = (),
     ) -> None:
         with Session(self.engine) as session:
             run = session.get(FetchRun, fetch_run_id)
@@ -220,6 +246,8 @@ class AuctionRepository:
                         total_quantity=summary.total_quantity,
                         min_unit_price=summary.min_unit_price,
                         median_unit_price=summary.median_unit_price,
+                        first_quartile_unit_price=summary.first_quartile_unit_price,
+                        third_quartile_unit_price=summary.third_quartile_unit_price,
                     )
                 )
 
@@ -233,6 +261,8 @@ class AuctionRepository:
                         total_quantity=metric.total_quantity,
                         min_unit_price=metric.min_unit_price,
                         median_unit_price=metric.median_unit_price,
+                        first_quartile_unit_price=metric.first_quartile_unit_price,
+                        third_quartile_unit_price=metric.third_quartile_unit_price,
                         weighted_average_unit_price=metric.weighted_average_unit_price,
                         lowest_price_quantity=metric.lowest_price_quantity,
                     )
@@ -257,6 +287,22 @@ class AuctionRepository:
                         previous_bid=observation.previous_bid,
                         time_left=observation.time_left,
                         previous_time_left=observation.previous_time_left,
+                    )
+                )
+
+            for metric in sell_through_metrics:
+                session.add(
+                    SellThroughMetricRecord(
+                        fetch_run_id=fetch_run_id,
+                        item_id=metric.item_id,
+                        market=metric.market,
+                        disappeared_listing_count=metric.disappeared_listing_count,
+                        disappeared_quantity=metric.disappeared_quantity,
+                        disappeared_value=metric.disappeared_value,
+                        observed_listing_count=metric.observed_listing_count,
+                        observed_quantity=metric.observed_quantity,
+                        sell_through_ratio_bps=round(metric.sell_through_ratio * 10000),
+                        confidence=metric.confidence,
                     )
                 )
 
@@ -288,6 +334,8 @@ class AuctionRepository:
                     total_quantity=row.total_quantity,
                     min_unit_price=row.min_unit_price,
                     median_unit_price=row.median_unit_price,
+                    first_quartile_unit_price=row.first_quartile_unit_price,
+                    third_quartile_unit_price=row.third_quartile_unit_price,
                 )
                 for row in rows
             ]
@@ -379,3 +427,60 @@ class AuctionRepository:
             record.name = item.name
             record.market = item.market.value
             record.updated_at = now
+
+
+def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as connection:
+        _ensure_sqlite_columns(
+            connection,
+            "item_summaries",
+            {
+                "first_quartile_unit_price": "integer",
+                "third_quartile_unit_price": "integer",
+            },
+        )
+        _ensure_sqlite_columns(
+            connection,
+            "item_history_metrics",
+            {
+                "first_quartile_unit_price": "integer",
+                "third_quartile_unit_price": "integer",
+            },
+        )
+        connection.exec_driver_sql(
+            """
+            create table if not exists sell_through_metrics (
+                id integer primary key,
+                fetch_run_id integer not null,
+                item_id integer not null,
+                market varchar(32) not null,
+                disappeared_listing_count integer not null,
+                disappeared_quantity integer not null,
+                disappeared_value integer,
+                observed_listing_count integer not null,
+                observed_quantity integer not null,
+                sell_through_ratio_bps integer not null,
+                confidence integer not null,
+                foreign key(fetch_run_id) references fetch_runs (id)
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "create index if not exists ix_sell_through_metrics_fetch_run_id on sell_through_metrics (fetch_run_id)"
+        )
+        connection.exec_driver_sql(
+            "create index if not exists ix_sell_through_metrics_item_id on sell_through_metrics (item_id)"
+        )
+
+
+def _ensure_sqlite_columns(connection: Connection, table_name: str, columns: dict[str, str]) -> None:
+    existing_columns = {
+        str(row[1])
+        for row in connection.exec_driver_sql(f"pragma table_info({table_name})")
+    }
+    for column_name, column_type in columns.items():
+        if column_name not in existing_columns:
+            connection.exec_driver_sql(f"alter table {table_name} add column {column_name} {column_type}")

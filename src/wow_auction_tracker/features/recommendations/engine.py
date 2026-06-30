@@ -19,11 +19,15 @@ class RecommendationInputs:
     latest_median_unit_price: int | None
     latest_listing_count: int
     latest_total_quantity: int
+    average_first_quartile_unit_price: int | None
     average_median_unit_price: int | None
+    average_third_quartile_unit_price: int | None
     average_weighted_unit_price: int | None
     average_listing_count: float
     average_total_quantity: float
     recent_quantity_drop_ratio: float
+    average_sell_through_ratio: float
+    average_sell_through_confidence: int
 
 
 @dataclass(frozen=True)
@@ -36,9 +40,14 @@ class Recommendation:
     confidence: int
     latest_min_unit_price: int | None
     latest_median_unit_price: int | None
+    recommended_sell_price: int | None
+    average_first_quartile_unit_price: int | None
     average_median_unit_price: int | None
+    average_third_quartile_unit_price: int | None
     average_weighted_unit_price: int | None
     estimated_demand_score: int
+    average_sell_through_ratio: float
+    average_sell_through_confidence: int
     reasons: list[str]
 
 
@@ -87,7 +96,9 @@ class RecommendationEngine:
                 s.listing_count,
                 s.total_quantity,
                 s.min_unit_price,
+                s.first_quartile_unit_price,
                 s.median_unit_price,
+                s.third_quartile_unit_price,
                 s.{weighted_column} as weighted_average_unit_price
             from {source_table} s
             join fetch_runs r on r.id = s.fetch_run_id
@@ -99,7 +110,17 @@ class RecommendationEngine:
         ).fetchall()
         rows = list(reversed(rows))
         latest = rows[-1] if rows else None
+        first_quartiles = [
+            int(row["first_quartile_unit_price"])
+            for row in rows
+            if "first_quartile_unit_price" in row.keys() and row["first_quartile_unit_price"] is not None
+        ]
         medians = [int(row["median_unit_price"]) for row in rows if row["median_unit_price"] is not None]
+        third_quartiles = [
+            int(row["third_quartile_unit_price"])
+            for row in rows
+            if "third_quartile_unit_price" in row.keys() and row["third_quartile_unit_price"] is not None
+        ]
         weighted_averages = [
             int(row["weighted_average_unit_price"])
             for row in rows
@@ -107,6 +128,11 @@ class RecommendationEngine:
         ]
         listing_counts = [int(row["listing_count"]) for row in rows]
         quantities = [int(row["total_quantity"]) for row in rows]
+        sell_through = _load_sell_through_inputs(
+            connection,
+            int(item_row["item_id"]),
+            self.lookback_runs,
+        )
 
         return RecommendationInputs(
             item_id=int(item_row["item_id"]),
@@ -119,11 +145,15 @@ class RecommendationEngine:
             ),
             latest_listing_count=int(latest["listing_count"]) if latest else 0,
             latest_total_quantity=int(latest["total_quantity"]) if latest else 0,
+            average_first_quartile_unit_price=int(mean(first_quartiles)) if first_quartiles else None,
             average_median_unit_price=int(mean(medians)) if medians else None,
+            average_third_quartile_unit_price=int(mean(third_quartiles)) if third_quartiles else None,
             average_weighted_unit_price=int(mean(weighted_averages)) if weighted_averages else None,
             average_listing_count=mean(listing_counts) if listing_counts else 0.0,
             average_total_quantity=mean(quantities) if quantities else 0.0,
             recent_quantity_drop_ratio=_recent_drop_ratio(quantities),
+            average_sell_through_ratio=sell_through[0],
+            average_sell_through_confidence=sell_through[1],
         )
 
     def _score(self, inputs: RecommendationInputs) -> Recommendation:
@@ -137,17 +167,24 @@ class RecommendationEngine:
                 confidence=_confidence(inputs.snapshots, self.lookback_runs),
                 latest_min_unit_price=inputs.latest_min_unit_price,
                 latest_median_unit_price=inputs.latest_median_unit_price,
+                recommended_sell_price=_recommended_sell_price(inputs),
+                average_first_quartile_unit_price=inputs.average_first_quartile_unit_price,
                 average_median_unit_price=inputs.average_median_unit_price,
+                average_third_quartile_unit_price=inputs.average_third_quartile_unit_price,
                 average_weighted_unit_price=inputs.average_weighted_unit_price,
                 estimated_demand_score=0,
+                average_sell_through_ratio=inputs.average_sell_through_ratio,
+                average_sell_through_confidence=inputs.average_sell_through_confidence,
                 reasons=[f"needs at least {self.min_snapshots} snapshots"],
             )
 
         average_price = inputs.average_weighted_unit_price or inputs.average_median_unit_price
         price_score = _price_discount_score(inputs.latest_min_unit_price, average_price)
         scarcity_score = _scarcity_score(inputs.latest_listing_count, inputs.average_listing_count)
-        demand_score = round(inputs.recent_quantity_drop_ratio * 100)
+        demand_score = _demand_score(inputs.recent_quantity_drop_ratio, inputs.average_sell_through_ratio)
         confidence = _confidence(inputs.snapshots, self.lookback_runs)
+        if inputs.average_sell_through_confidence > 0:
+            confidence = round((confidence * 0.75) + (inputs.average_sell_through_confidence * 0.25))
         score = round((price_score * 0.45) + (demand_score * 0.25) + (scarcity_score * 0.15) + (confidence * 0.15))
         action = _action_for_score(score)
 
@@ -160,9 +197,14 @@ class RecommendationEngine:
             confidence=confidence,
             latest_min_unit_price=inputs.latest_min_unit_price,
             latest_median_unit_price=inputs.latest_median_unit_price,
+            recommended_sell_price=_recommended_sell_price(inputs),
+            average_first_quartile_unit_price=inputs.average_first_quartile_unit_price,
             average_median_unit_price=inputs.average_median_unit_price,
+            average_third_quartile_unit_price=inputs.average_third_quartile_unit_price,
             average_weighted_unit_price=inputs.average_weighted_unit_price,
             estimated_demand_score=max(0, min(demand_score, 100)),
+            average_sell_through_ratio=inputs.average_sell_through_ratio,
+            average_sell_through_confidence=inputs.average_sell_through_confidence,
             reasons=_reasons(inputs, price_score, scarcity_score, demand_score),
         )
 
@@ -177,9 +219,14 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "confidence": recommendation.confidence,
         "latest_min_unit_price": recommendation.latest_min_unit_price,
         "latest_median_unit_price": recommendation.latest_median_unit_price,
+        "recommended_sell_price": recommendation.recommended_sell_price,
+        "average_first_quartile_unit_price": recommendation.average_first_quartile_unit_price,
         "average_median_unit_price": recommendation.average_median_unit_price,
+        "average_third_quartile_unit_price": recommendation.average_third_quartile_unit_price,
         "average_weighted_unit_price": recommendation.average_weighted_unit_price,
         "estimated_demand_score": recommendation.estimated_demand_score,
+        "average_sell_through_ratio": recommendation.average_sell_through_ratio,
+        "average_sell_through_confidence": recommendation.average_sell_through_confidence,
         "reasons": recommendation.reasons,
     }
 
@@ -196,6 +243,14 @@ def _price_discount_score(latest_min: int | None, average_median: int | None) ->
         return 0
     discount_ratio = (average_median - latest_min) / average_median
     return round(max(0.0, min(discount_ratio, 1.0)) * 100)
+
+
+def _recommended_sell_price(inputs: RecommendationInputs) -> int | None:
+    return (
+        inputs.average_first_quartile_unit_price
+        or inputs.average_median_unit_price
+        or inputs.latest_median_unit_price
+    )
 
 
 def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
@@ -215,6 +270,34 @@ def _history_metric_count(connection: sqlite3.Connection, item_id: int) -> int:
     ).fetchone()[0])
 
 
+def _load_sell_through_inputs(
+    connection: sqlite3.Connection,
+    item_id: int,
+    lookback_runs: int,
+) -> tuple[float, int]:
+    if not _table_exists(connection, "sell_through_metrics"):
+        return (0.0, 0)
+
+    rows = connection.execute(
+        """
+        select sell_through_ratio_bps, confidence
+        from sell_through_metrics s
+        join fetch_runs r on r.id = s.fetch_run_id
+        where s.item_id = ? and r.status = 'success'
+        order by s.fetch_run_id desc
+        limit ?
+        """,
+        (item_id, lookback_runs),
+    ).fetchall()
+    if not rows:
+        return (0.0, 0)
+
+    return (
+        mean(int(row["sell_through_ratio_bps"]) / 10000 for row in rows),
+        round(mean(int(row["confidence"]) for row in rows)),
+    )
+
+
 def _scarcity_score(latest_listing_count: int, average_listing_count: float) -> int:
     if average_listing_count <= 0:
         return 0
@@ -232,6 +315,12 @@ def _recent_drop_ratio(quantities: list[int]) -> float:
             continue
         drops.append(max(0.0, (previous - current) / previous))
     return mean(drops) if drops else 0.0
+
+
+def _demand_score(recent_quantity_drop_ratio: float, average_sell_through_ratio: float) -> int:
+    quantity_drop_score = recent_quantity_drop_ratio * 100
+    sell_through_score = average_sell_through_ratio * 100
+    return round(max(quantity_drop_score, (quantity_drop_score * 0.35) + (sell_through_score * 0.65)))
 
 
 def _confidence(snapshot_count: int, lookback_runs: int) -> int:
@@ -256,7 +345,10 @@ def _reasons(
     if price_score > 0:
         reasons.append(f"lowest listing is {price_score}% below recent median")
     if demand_score > 0:
-        reasons.append(f"recent listed quantity dropped by an estimated {demand_score}%")
+        if inputs.average_sell_through_ratio > 0:
+            reasons.append(f"inferred sell-through is {round(inputs.average_sell_through_ratio * 100)}%")
+        else:
+            reasons.append(f"recent listed quantity dropped by an estimated {demand_score}%")
     if scarcity_score > 0:
         reasons.append(f"listing count is {scarcity_score}% below recent average")
     if inputs.snapshots > 0:

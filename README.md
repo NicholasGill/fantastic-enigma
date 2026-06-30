@@ -76,9 +76,19 @@ Open `http://127.0.0.1:8000` to inspect database size, snapshot counts, latest
 item summaries, recommendations, recent runs, and per-item price history. Use
 `--port` if port 8000 is already in use.
 
+Price summaries include minimum, first quartile, median, and third quartile unit
+prices. The dashboard history chart uses the quartile band for scale so extreme
+listings do not dominate the presentation.
+
 Snapshot fetches also collect missing item metadata from Blizzard's item and
 media endpoints, including item quality, class, subclass, stackability, vendor
 prices, and icon URL.
+
+Snapshot fetches also infer sell-through by comparing consecutive snapshots.
+Missing listings are aggregated by item as disappeared listing count,
+disappeared quantity, disappeared value, sell-through ratio, and confidence.
+This is an estimate only: missing listings may have sold, expired, been
+cancelled, or been reposted.
 
 Show current item recommendations from stored snapshot history:
 
@@ -86,10 +96,55 @@ Show current item recommendations from stored snapshot history:
 uv run wow-auctions recommend --limit 10
 ```
 
+Print the latest stored item summaries:
+
+```bash
+uv run wow-auctions report latest --limit 10
+```
+
+Print snapshot history for one item:
+
+```bash
+uv run wow-auctions report item --item-id 210930
+```
+
+Export stored data to CSV:
+
+```bash
+uv run wow-auctions export latest --output latest.csv
+uv run wow-auctions export item --item-id 210930 --output item-history.csv
+uv run wow-auctions export recommendations --limit 10
+```
+
 Recommendations are conservative estimates based on current price versus recent
-median price, recent quantity drops, listing scarcity, and snapshot count. They
-are not confirmed sales because Blizzard's auction APIs expose current listings,
-not completed purchases.
+median price, inferred sell-through, recent quantity drops, listing scarcity,
+and snapshot count. They are not confirmed sales because Blizzard's auction APIs
+expose current listings, not completed purchases.
+
+Recommendation output includes a recommended sell price. This is a conservative
+target based on recent average first-quartile unit price when available, falling
+back to recent median price. It is meant to avoid pricing from extreme outlier
+listings.
+
+## Companion Addon
+
+The `addons/WowAuctionTracker` directory contains a minimal Retail addon for
+capturing your own auction activity into WoW SavedVariables. Install it by
+copying that directory to:
+
+```text
+World of Warcraft/_retail_/Interface/AddOns/WowAuctionTracker
+```
+
+In game, use `/wat scan` at the auction house and `/wat mail` at the mailbox.
+The addon records owned-auction snapshots and auction-related mailbox rows to:
+
+```text
+World of Warcraft/_retail_/WTF/Account/<ACCOUNT>/SavedVariables/WowAuctionTracker.lua
+```
+
+SavedVariables are written after `/reload`, logout, or game exit. A Python
+import command for this file is planned next.
 
 ## Project Layout
 
@@ -100,6 +155,7 @@ not completed purchases.
 - `features/scheduler/`: repeated snapshot runner.
 - `features/snapshots.py`: fetch-and-store workflow.
 - `storage/`: SQLAlchemy models and repository code.
+- `addons/WowAuctionTracker/`: optional in-game addon for player auction data.
 
 ## Snapshot Cadence
 

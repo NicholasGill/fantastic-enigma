@@ -26,26 +26,29 @@ snapshots into useful pricing and demand signals for tracked items.
     `ended_estimated` confidence fields still belong with sell-through scoring.
 
 - [x] Generate item-level historical metrics.
-  - Calculate min, median, and weighted average unit price per snapshot.
+  - Calculate min, first quartile, median, third quartile, and weighted average
+    unit price per snapshot.
   - Track total listed quantity, listing count, and lowest-price quantity.
   - Persist metrics in `item_history_metrics` for new snapshots.
   - Calculate moving averages over recent snapshots.
 
-- [ ] Estimate demand and sell-through signals.
+- [x] Estimate demand and sell-through signals.
   - Compare consecutive snapshots for disappeared listings.
   - Estimate disappeared quantity and disappeared value by item.
   - Produce conservative demand scores from repeated disappearance patterns.
+  - Store per-snapshot inferred metrics in `sell_through_metrics`.
 
 - [x] Add initial recommendation engine.
   - Score tracked items from current price versus recent median price.
   - Include conservative demand proxy from recent quantity drops.
+  - Include a recommended sell price from recent first-quartile pricing.
   - Show score, confidence, and reasons in the CLI and dashboard.
 
-- [ ] Add reporting commands.
+- [x] Add reporting commands.
   - Show latest item summaries in gold/silver/copper.
   - Show price history for one item.
   - Show inferred recommendation scores for tracked items.
-  - Export summaries to CSV for spreadsheet analysis.
+- [x] Export summaries to CSV for spreadsheet analysis.
 
 - [x] Add built-in scheduled snapshot support.
   - Add a built-in `wow-auctions schedule --interval-minutes ...` command.
@@ -56,12 +59,31 @@ snapshots into useful pricing and demand signals for tracked items.
   - Add safeguards to avoid overlapping fetch runs.
   - Record expected snapshot interval for inference calculations.
 
+## Player Auction Features
+
+- [x] Add minimal WoW companion addon.
+  - Record owned-auction snapshots from the auction house.
+  - Record auction-related mailbox rows for sale/expiry/cancel signals.
+  - Store data in `WowAuctionTrackerDB` SavedVariables.
+
+- [ ] Import companion addon SavedVariables.
+  - Parse `WowAuctionTracker.lua`.
+  - Store player auction posts and outcomes in SQLite.
+  - Preserve raw addon rows for classifier improvements.
+
+- [ ] Blend player auction outcomes into recommendations.
+  - Track character-specific sale rate, time to sale, expired rate, and net
+    proceeds.
+  - Prefer real player outcomes over inferred market sell-through when enough
+    personal history exists.
+
 ## Data Model Ideas
 
 - `item_metadata`: durable Blizzard item details and icon media.
 - `listing_observations`: one row per observed listing per fetch run.
 - `listing_lifecycles`: best-effort status for listings across snapshots.
 - `item_history_metrics`: per-item metrics calculated for each fetch run.
+- `sell_through_metrics`: per-item inferred disappearance metrics per fetch run.
 - `item_daily_metrics`: rolled-up daily price, availability, and demand signals.
 
 ## Implementation Order

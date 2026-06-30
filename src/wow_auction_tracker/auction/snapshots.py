@@ -36,6 +36,8 @@ class ItemSummary:
     total_quantity: int
     min_unit_price: int | None
     median_unit_price: int | None
+    first_quartile_unit_price: int | None
+    third_quartile_unit_price: int | None
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,8 @@ class ItemHistoryMetric:
     total_quantity: int
     min_unit_price: int | None
     median_unit_price: int | None
+    first_quartile_unit_price: int | None
+    third_quartile_unit_price: int | None
     weighted_average_unit_price: int | None
     lowest_price_quantity: int
 
@@ -97,6 +101,7 @@ def summarize_listings(listings: Iterable[AuctionListing]) -> list[ItemSummary]:
             for listing in item_list
             if listing.effective_unit_price is not None
         ]
+        first_quartile, third_quartile = _quartiles(prices)
         summaries.append(
             ItemSummary(
                 item_id=item_id,
@@ -105,6 +110,8 @@ def summarize_listings(listings: Iterable[AuctionListing]) -> list[ItemSummary]:
                 total_quantity=sum(listing.quantity for listing in item_list),
                 min_unit_price=min(prices) if prices else None,
                 median_unit_price=int(median(prices)) if prices else None,
+                first_quartile_unit_price=first_quartile,
+                third_quartile_unit_price=third_quartile,
             )
         )
 
@@ -125,6 +132,7 @@ def calculate_item_history_metrics(listings: Iterable[AuctionListing]) -> list[I
         ]
         prices = [listing.effective_unit_price for listing in priced_listings]
         min_price = min(prices) if prices else None
+        first_quartile, third_quartile = _quartiles(prices)
         priced_quantity = sum(listing.quantity for listing in priced_listings)
         weighted_total = sum(
             listing.effective_unit_price * listing.quantity
@@ -139,6 +147,8 @@ def calculate_item_history_metrics(listings: Iterable[AuctionListing]) -> list[I
                 total_quantity=sum(listing.quantity for listing in item_list),
                 min_unit_price=min_price,
                 median_unit_price=int(median(prices)) if prices else None,
+                first_quartile_unit_price=first_quartile,
+                third_quartile_unit_price=third_quartile,
                 weighted_average_unit_price=weighted_total // priced_quantity if priced_quantity else None,
                 lowest_price_quantity=sum(
                     listing.quantity
@@ -149,6 +159,24 @@ def calculate_item_history_metrics(listings: Iterable[AuctionListing]) -> list[I
         )
 
     return sorted(metrics, key=lambda item: (item.market.value, item.item_id))
+
+
+def _quartiles(values: list[int | None]) -> tuple[int | None, int | None]:
+    prices = sorted(value for value in values if value is not None)
+    if not prices:
+        return (None, None)
+    if len(prices) == 1:
+        return (prices[0], prices[0])
+
+    midpoint = len(prices) // 2
+    if len(prices) % 2 == 0:
+        lower = prices[:midpoint]
+        upper = prices[midpoint:]
+    else:
+        lower = prices[:midpoint]
+        upper = prices[midpoint + 1 :]
+
+    return (int(median(lower or prices)), int(median(upper or prices)))
 
 
 def _optional_int(value: object) -> int | None:

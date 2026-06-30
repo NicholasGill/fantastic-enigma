@@ -12,6 +12,7 @@ from wow_auction_tracker.clients.blizzard import BlizzardClient
 from wow_auction_tracker.config import Market, TrackerConfig
 from wow_auction_tracker.features.lifecycle import build_listing_observations
 from wow_auction_tracker.features.metadata import ItemMetadata, parse_item_metadata
+from wow_auction_tracker.features.sellthrough import build_sell_through_metrics
 from wow_auction_tracker.storage import AuctionRepository
 
 
@@ -53,12 +54,14 @@ def fetch_and_store(
             else []
         )
         listing_observations = build_listing_observations(listings, previous_listings)
+        sell_through_metrics = build_sell_through_metrics(listing_observations)
         repository.complete_fetch_run(
             fetch_run_id,
             listings,
             summaries,
             history_metrics,
             listing_observations,
+            sell_through_metrics,
         )
         return FetchResult(
             fetch_run_id=fetch_run_id,
