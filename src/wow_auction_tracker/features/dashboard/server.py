@@ -3,12 +3,10 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
+from flask import Flask, Response, jsonify, request
 from sqlalchemy.engine import make_url
 
 from wow_auction_tracker.features.recommendations import RecommendationEngine, recommendation_to_dict
@@ -29,6 +27,8 @@ class DashboardConfig:
     database_url: str
     host: str
     port: int
+    dev_mode: bool = False
+    reload: bool = False
 
 
 class DashboardDataStore:
@@ -36,7 +36,7 @@ class DashboardDataStore:
         self.database_url = database_url
         self.database_path = _sqlite_database_path(database_url)
 
-    def overview(self, *, display_timezone: str = DEFAULT_DISPLAY_TIMEZONE) -> dict[str, Any]:
+    def overview(self, *, display_timezone: str = DEFAULT_DISPLAY_TIMEZONE, dev_mode: bool = False) -> dict[str, Any]:
         with self._connect() as connection:
             latest_run = connection.execute(
                 """
@@ -79,11 +79,16 @@ class DashboardDataStore:
                     continue
                 item["recommended_buy_price"] = recommendation.get("recommended_buy_price")
                 item["recommended_sell_price"] = recommendation.get("recommended_sell_price")
+                item["recommended_sell_price_source"] = recommendation.get("recommended_sell_price_source")
                 item["recommendation_action"] = recommendation.get("action")
                 item["recommendation_score"] = recommendation.get("score")
                 item["recommendation_confidence"] = recommendation.get("confidence")
                 item["average_sell_through_ratio"] = recommendation.get("average_sell_through_ratio")
                 item["average_sell_through_ratio_bps"] = round(float(recommendation.get("average_sell_through_ratio") or 0) * 10000)
+                item["average_probable_sold_unit_price"] = recommendation.get("average_probable_sold_unit_price")
+                item["vendor_sell_unit_price"] = recommendation.get("vendor_sell_unit_price")
+                item["auction_deposit_unit_price"] = recommendation.get("auction_deposit_unit_price")
+                item["estimated_profit_unit_price"] = recommendation.get("estimated_profit_unit_price")
                 item["best_buy_time"] = recommendation.get("best_buy_time")
                 item["best_sell_time"] = recommendation.get("best_sell_time")
                 item["historical_buy_price"] = recommendation.get("historical_buy_price")
@@ -93,6 +98,8 @@ class DashboardDataStore:
                     item.get("min_unit_price"),
                     recommendation.get("recommended_buy_price"),
                 )
+            if dev_mode:
+                _apply_dev_buy_opportunities(items)
             items.sort(
                 key=lambda item: (
                     int(item.get("recommendation_score") or 0),
@@ -111,6 +118,8 @@ class DashboardDataStore:
                 "items": items,
                 "latest_lifecycle": self._latest_lifecycle(connection, latest_run["id"] if latest_run else None),
                 "recommendations": recommendations,
+                "player_activity": self._player_activity(connection),
+                "dev_mode": dev_mode,
             }
 
     def item_history(self, item_id: int) -> dict[str, Any]:
@@ -173,6 +182,7 @@ class DashboardDataStore:
             "item_history_metrics",
             "listing_observations",
             "sell_through_metrics",
+            "buy_opportunity_observations",
             "addon_imports",
             "player_auction_posts",
             "player_auction_outcomes",
@@ -287,71 +297,158 @@ class DashboardDataStore:
             ) or _crafting_quality_from_item_rank(connection, int(item["item_id"]))
         return items
 
+    @staticmethod
+    def _player_activity(connection: sqlite3.Connection) -> dict[str, Any]:
+        latest_import = connection.execute(
+            """
+            select id, imported_at, source_path, owned_snapshot_count, mail_event_count
+            from addon_imports
+            order by id desc
+            limit 1
+            """
+        ).fetchone()
+        listings = connection.execute(
+            """
+            with ranked_posts as (
+                select
+                    p.*,
+                    row_number() over (
+                        partition by coalesce(cast(p.auction_id as text), 'row-' || cast(p.id as text))
+                        order by p.observed_at desc, p.id desc
+                    ) as post_rank
+                from player_auction_posts p
+            )
+            select
+                p.id,
+                p.observed_at,
+                p.reason,
+                p.character,
+                p.realm,
+                p.auction_id,
+                p.item_id,
+                coalesce(m.name, t.name, 'Item ' || p.item_id) as name,
+                p.quantity,
+                p.unit_price,
+                p.buyout,
+                p.bid_amount,
+                p.time_left_seconds,
+                p.status
+            from ranked_posts p
+            left join item_metadata m on m.item_id = p.item_id
+            left join tracked_items t on t.item_id = p.item_id
+            where p.post_rank = 1
+            order by p.observed_at desc, p.id desc
+            limit 12
+            """
+        ).fetchall()
+        outcomes = connection.execute(
+            """
+            select
+                o.id,
+                o.observed_at,
+                o.character,
+                o.realm,
+                o.item_id,
+                coalesce(m.name, o.item_name, t.name, 'Item ' || o.item_id) as name,
+                o.item_count,
+                o.outcome,
+                o.money
+            from player_auction_outcomes o
+            left join item_metadata m on m.item_id = o.item_id
+            left join tracked_items t on t.item_id = o.item_id
+            order by o.observed_at desc, o.id desc
+            limit 12
+            """
+        ).fetchall()
+        buy_opportunities = connection.execute(
+            """
+            select
+                b.id,
+                b.observed_at,
+                b.fetch_run_id,
+                b.item_id,
+                coalesce(m.name, t.name, 'Item ' || b.item_id) as name,
+                b.market,
+                b.auction_id,
+                b.unit_price,
+                b.quantity,
+                b.buy_target_unit_price,
+                b.sell_target_unit_price,
+                b.potential_profit,
+                b.available_quantity_at_or_below_buy_target,
+                b.recommendation_score,
+                b.recommendation_confidence,
+                b.listing_status
+            from buy_opportunity_observations b
+            left join item_metadata m on m.item_id = b.item_id
+            left join tracked_items t on t.item_id = b.item_id
+            order by b.observed_at desc, b.id desc
+            limit 12
+            """
+        ).fetchall()
+        summary = connection.execute(
+            """
+            select
+                (select count(distinct coalesce(cast(auction_id as text), 'row-' || cast(id as text)))
+                    from player_auction_posts) as listing_count,
+                (select count(*) from player_auction_outcomes where outcome = 'sold') as sold_count,
+                (select coalesce(sum(money), 0) from player_auction_outcomes where outcome = 'sold') as sold_money,
+                (select count(*) from buy_opportunity_observations) as buy_opportunity_count
+            """
+        ).fetchone()
+        return {
+            "latest_import": dict(latest_import) if latest_import else None,
+            "summary": dict(summary) if summary else {},
+            "listings": [dict(row) for row in listings],
+            "outcomes": [dict(row) for row in outcomes],
+            "buy_opportunities": [dict(row) for row in buy_opportunities],
+        }
+
+
+def create_dashboard_app(config: DashboardConfig) -> Flask:
+    store = DashboardDataStore(config.database_url)
+    app = Flask(__name__)
+
+    @app.after_request
+    def _disable_cache(response: Response) -> Response:
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/")
+    def _index() -> Response:
+        return Response(DASHBOARD_HTML, mimetype="text/html")
+
+    @app.get("/api/overview")
+    def _overview() -> Response:
+        display_timezone = _dashboard_timezone(request.args.get("timezone", DEFAULT_DISPLAY_TIMEZONE))
+        return jsonify(store.overview(display_timezone=display_timezone, dev_mode=config.dev_mode))
+
+    @app.get("/api/history")
+    def _history() -> Response | tuple[Response, int]:
+        item_value = request.args.get("item_id")
+        if not item_value:
+            return jsonify({"error": "item_id is required"}), 400
+        try:
+            item_id = int(item_value)
+        except ValueError:
+            return jsonify({"error": "item_id must be an integer"}), 400
+        return jsonify(store.item_history(item_id))
+
+    return app
+
 
 def serve_dashboard(config: DashboardConfig) -> None:
-    store = DashboardDataStore(config.database_url)
-
-    class DashboardHandler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            parsed_url = urlparse(self.path)
-            if parsed_url.path == "/":
-                self._send_html(DASHBOARD_HTML)
-                return
-
-            if parsed_url.path == "/api/overview":
-                query = parse_qs(parsed_url.query)
-                display_timezone = _dashboard_timezone(query.get("timezone", [DEFAULT_DISPLAY_TIMEZONE])[0])
-                self._send_json(store.overview(display_timezone=display_timezone))
-                return
-
-            if parsed_url.path == "/api/history":
-                query = parse_qs(parsed_url.query)
-                item_values = query.get("item_id", [])
-                if not item_values:
-                    self._send_error(HTTPStatus.BAD_REQUEST, "item_id is required")
-                    return
-                try:
-                    item_id = int(item_values[0])
-                except ValueError:
-                    self._send_error(HTTPStatus.BAD_REQUEST, "item_id must be an integer")
-                    return
-                self._send_json(store.item_history(item_id))
-                return
-
-            self._send_error(HTTPStatus.NOT_FOUND, "not found")
-
-        def log_message(self, format: str, *args: object) -> None:
-            return
-
-        def _send_html(self, content: str) -> None:
-            encoded = content.encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
-
-        def _send_json(self, payload: dict[str, Any]) -> None:
-            encoded = json.dumps(payload, default=str).encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
-
-        def _send_error(self, status: HTTPStatus, message: str) -> None:
-            encoded = json.dumps({"error": message}).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
-
-    server = ThreadingHTTPServer((config.host, config.port), DashboardHandler)
+    app = create_dashboard_app(config)
     print(f"Dashboard running at http://{config.host}:{config.port}")
-    server.serve_forever()
+    if config.reload:
+        print("Dashboard reload mode enabled")
+    app.run(
+        host=config.host,
+        port=config.port,
+        debug=config.reload,
+        use_reloader=config.reload,
+        threaded=True,
+    )
 
 
 def format_file_size(size_bytes: int) -> str:
@@ -379,6 +476,25 @@ def _has_buy_opportunity(min_unit_price: object, recommended_buy_price: object) 
     if min_unit_price is None or recommended_buy_price is None:
         return False
     return int(min_unit_price) < int(recommended_buy_price)
+
+
+def _apply_dev_buy_opportunities(items: list[dict[str, Any]], *, limit: int = 3) -> None:
+    decorated = 0
+    for item in items:
+        min_price = item.get("min_unit_price")
+        if min_price is None:
+            continue
+
+        min_price_int = int(min_price)
+        buy_price = item.get("recommended_buy_price")
+        if buy_price is None or int(buy_price) <= min_price_int:
+            item["recommended_buy_price"] = max(min_price_int + 1, round(min_price_int * 1.12))
+
+        item["has_buy_opportunity"] = True
+        item["dev_buy_opportunity"] = True
+        decorated += 1
+        if decorated >= limit:
+            return
 
 
 def _latest_crafting_quality(
@@ -536,10 +652,40 @@ DASHBOARD_HTML = """<!doctype html>
     }
     button:hover { border-color: var(--accent); }
     main {
+      padding: 18px 24px 28px;
+    }
+    .tab-list {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .tab-button {
+      border: 0;
+      border-bottom: 3px solid transparent;
+      border-radius: 0;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .tab-button.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .market-layout {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 360px;
       gap: 18px;
-      padding: 18px 24px 28px;
+    }
+    .player-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .player-grid section:first-child {
+      grid-column: 1 / -1;
     }
     section {
       min-width: 0;
@@ -594,7 +740,7 @@ DASHBOARD_HTML = """<!doctype html>
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 1120px;
+      min-width: 880px;
     }
     th, td {
       padding: 10px 12px;
@@ -718,6 +864,18 @@ DASHBOARD_HTML = """<!doctype html>
       max-height: 360px;
       overflow: auto;
     }
+    .mini-table-wrap {
+      overflow: auto;
+      max-height: 420px;
+    }
+    .mini-table {
+      min-width: 760px;
+    }
+    .mini-table th,
+    .mini-table td {
+      padding: 8px 10px;
+      font-size: 12px;
+    }
     .recommendation {
       border-bottom: 1px solid var(--line);
       padding-bottom: 10px;
@@ -771,6 +929,67 @@ DASHBOARD_HTML = """<!doctype html>
       font-size: 12px;
       white-space: nowrap;
     }
+    .auto-refresh {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .auto-refresh input {
+      width: 16px;
+      min-width: 16px;
+      height: 16px;
+      margin: 0;
+    }
+    .dev-mode {
+      display: none;
+      align-items: center;
+      height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      background: #e6f2ed;
+      color: var(--good);
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    body.dev-mode-active .dev-mode { display: inline-flex; }
+    .dev-marker {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 18px;
+      margin-left: 6px;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: #dcefe5;
+      color: var(--good);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      vertical-align: middle;
+    }
+    .source-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 18px;
+      margin-left: 6px;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: #edf1f5;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      vertical-align: middle;
+    }
+    .source-probable-sold {
+      background: #dcefe5;
+      color: var(--good);
+    }
     input, select {
       height: 36px;
       border: 1px solid var(--line);
@@ -786,7 +1005,9 @@ DASHBOARD_HTML = """<!doctype html>
       min-width: 132px;
     }
     @media (max-width: 980px) {
-      main { grid-template-columns: 1fr; padding: 14px; }
+      main { padding: 14px; }
+      .market-layout, .player-grid { grid-template-columns: 1fr; }
+      .player-grid section:first-child { grid-column: auto; }
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       header { padding: 14px; align-items: flex-start; flex-direction: column; }
       .toolbar { width: 100%; }
@@ -807,71 +1028,145 @@ DASHBOARD_HTML = """<!doctype html>
         <option value="America/Los_Angeles">Pacific</option>
         <option value="America/Phoenix">Arizona</option>
       </select>
+      <label class="auto-refresh"><input id="auto-refresh" type="checkbox" checked>Auto 30s</label>
+      <span class="dev-mode" id="dev-mode-status">Dev Mode</span>
       <span class="refresh-status" id="refresh-status">Not refreshed</span>
       <button id="refresh" type="button">Refresh</button>
     </div>
   </header>
   <main>
-    <div>
-      <div class="grid">
-        <div class="metric"><span>Database</span><strong id="db-size">-</strong></div>
-        <div class="metric"><span>Fetch Runs</span><strong id="fetch-runs">-</strong></div>
-        <div class="metric"><span>Listings</span><strong id="listings">-</strong></div>
-        <div class="metric"><span>Latest Run</span><strong id="latest-run">-</strong></div>
-        <div class="metric"><span>New Listings</span><strong id="new-listings">-</strong></div>
-        <div class="metric"><span>Missing Listings</span><strong id="missing-listings">-</strong></div>
-      </div>
-      <section>
-        <div class="section-head">
-          <h2>Latest Item Summaries</h2>
-          <span class="muted" id="latest-time">-</span>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Item<span class="column-help" tabindex="0" title="Tracked auction item name and Blizzard item class." aria-label="Tracked auction item name and Blizzard item class.">?</span></th>
-                <th>Crafting Quality<span class="column-help" tabindex="0" title="Crafting quality from auction listing modifiers when Blizzard includes it. Shows a dash when the auction payload does not include crafting quality." aria-label="Crafting quality from auction listing modifiers when Blizzard includes it. Shows a dash when the auction payload does not include crafting quality.">?</span></th>
-                <th>ID<span class="column-help" tabindex="0" title="Blizzard item ID from the configured tracked item list." aria-label="Blizzard item ID from the configured tracked item list.">?</span></th>
-                <th>Min<span class="column-help" tabindex="0" title="Lowest unit price currently listed in the latest snapshot." aria-label="Lowest unit price currently listed in the latest snapshot.">?</span></th>
-                <th>Q1<span class="column-help" tabindex="0" title="First quartile unit price from the latest snapshot; useful as a conservative market price." aria-label="First quartile unit price from the latest snapshot; useful as a conservative market price.">?</span></th>
-                <th>Median<span class="column-help" tabindex="0" title="Median unit price from the latest snapshot." aria-label="Median unit price from the latest snapshot.">?</span></th>
-                <th>Q3<span class="column-help" tabindex="0" title="Third quartile unit price from the latest snapshot; helps show the upper typical price band." aria-label="Third quartile unit price from the latest snapshot; helps show the upper typical price band.">?</span></th>
-                <th>Buy At<span class="column-help" tabindex="0" title="Recommended maximum buy price, targeting margin against the conservative sell price." aria-label="Recommended maximum buy price, targeting margin against the conservative sell price.">?</span></th>
-                <th>Sell At<span class="column-help" tabindex="0" title="Recommended conservative sell price, preferring recent first-quartile pricing and falling back to median pricing." aria-label="Recommended conservative sell price, preferring recent first-quartile pricing and falling back to median pricing.">?</span></th>
-                <th>Profit<span class="column-help" tabindex="0" title="Potential per-item profit before fees, calculated as recommended sell price minus recommended buy price." aria-label="Potential per-item profit before fees, calculated as recommended sell price minus recommended buy price.">?</span></th>
-                <th>Sell-through<span class="column-help" tabindex="0" title="Estimated demand signal from recent disappeared listings; this is inferred and not confirmed sales." aria-label="Estimated demand signal from recent disappeared listings; this is inferred and not confirmed sales.">?</span></th>
-                <th>Min Change<span class="column-help" tabindex="0" title="Change from the latest minimum price to the last different previous minimum price." aria-label="Change from the latest minimum price to the last different previous minimum price.">?</span></th>
-                <th>Listings<span class="column-help" tabindex="0" title="Number of active auction listings found for this item in the latest snapshot." aria-label="Number of active auction listings found for this item in the latest snapshot.">?</span></th>
-                <th>Quantity<span class="column-help" tabindex="0" title="Total quantity available across latest active listings for this item." aria-label="Total quantity available across latest active listings for this item.">?</span></th>
-              </tr>
-            </thead>
-            <tbody id="items"></tbody>
-          </table>
-        </div>
-      </section>
+    <div class="grid">
+      <div class="metric"><span>Database</span><strong id="db-size">-</strong></div>
+      <div class="metric"><span>Fetch Runs</span><strong id="fetch-runs">-</strong></div>
+      <div class="metric"><span>Listings</span><strong id="listings">-</strong></div>
+      <div class="metric"><span>Latest Run</span><strong id="latest-run">-</strong></div>
+      <div class="metric"><span>New Listings</span><strong id="new-listings">-</strong></div>
+      <div class="metric"><span>Missing Listings</span><strong id="missing-listings">-</strong></div>
+      <div class="metric"><span>My Listings</span><strong id="my-listings">-</strong></div>
+      <div class="metric"><span>Buy Signals</span><strong id="buy-signals">-</strong></div>
     </div>
-    <div class="stack">
-      <section>
-        <div class="section-head"><h2 id="chart-title">Price History</h2></div>
-        <div class="side-body">
-          <canvas id="history" width="640" height="320"></canvas>
-          <div class="muted" id="chart-note">Select an item to inspect snapshot history.</div>
+
+    <div class="tab-list" role="tablist" aria-label="Dashboard views">
+      <button class="tab-button active" id="market-tab" type="button" role="tab" aria-selected="true" aria-controls="market-panel" data-tab="market">Market</button>
+      <button class="tab-button" id="player-tab" type="button" role="tab" aria-selected="false" aria-controls="player-panel" data-tab="player">My Auctions</button>
+    </div>
+
+    <div class="tab-panel active" id="market-panel" role="tabpanel" aria-labelledby="market-tab" data-panel="market">
+      <div class="market-layout">
+        <div>
+          <section>
+            <div class="section-head">
+              <h2>Latest Item Summaries</h2>
+              <span class="muted" id="latest-time">-</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Item<span class="column-help" tabindex="0" title="Tracked auction item name and Blizzard item class." aria-label="Tracked auction item name and Blizzard item class.">?</span></th>
+                    <th>Crafting Quality<span class="column-help" tabindex="0" title="Crafting quality from auction listing modifiers when Blizzard includes it. Shows a dash when the auction payload does not include crafting quality." aria-label="Crafting quality from auction listing modifiers when Blizzard includes it. Shows a dash when the auction payload does not include crafting quality.">?</span></th>
+                    <th>ID<span class="column-help" tabindex="0" title="Blizzard item ID from the configured tracked item list." aria-label="Blizzard item ID from the configured tracked item list.">?</span></th>
+                    <th>Min / Unit<span class="column-help" tabindex="0" title="Lowest per-unit price currently listed in the latest snapshot." aria-label="Lowest per-unit price currently listed in the latest snapshot.">?</span></th>
+                    <th>Buy / Unit<span class="column-help" tabindex="0" title="Recommended maximum per-unit buy price, targeting margin against the conservative per-unit sell price." aria-label="Recommended maximum per-unit buy price, targeting margin against the conservative per-unit sell price.">?</span></th>
+                    <th>Sell / Unit<span class="column-help" tabindex="0" title="Recommended per-unit sell price from inferred sold listings, including disappeared listings classified as probable sales and listings whose quantity decreased." aria-label="Recommended per-unit sell price from inferred sold listings, including disappeared listings classified as probable sales and listings whose quantity decreased.">?</span></th>
+                    <th>Deposit / Unit<span class="column-help" tabindex="0" title="Estimated 48-hour auction deposit per unit from Blizzard vendor sell price metadata." aria-label="Estimated 48-hour auction deposit per unit from Blizzard vendor sell price metadata.">?</span></th>
+                    <th>Profit / Unit<span class="column-help" tabindex="0" title="Potential per-unit profit after subtracting estimated 48-hour auction deposit from recommended sell price minus recommended buy price." aria-label="Potential per-unit profit after subtracting estimated 48-hour auction deposit from recommended sell price minus recommended buy price.">?</span></th>
+                    <th>Sell-through<span class="column-help" tabindex="0" title="Estimated demand signal from recent disappeared listings; this is inferred and not confirmed sales." aria-label="Estimated demand signal from recent disappeared listings; this is inferred and not confirmed sales.">?</span></th>
+                    <th>Min Change<span class="column-help" tabindex="0" title="Change from the latest minimum price to the last different previous minimum price." aria-label="Change from the latest minimum price to the last different previous minimum price.">?</span></th>
+                    <th>Listings<span class="column-help" tabindex="0" title="Number of active auction listings found for this item in the latest snapshot." aria-label="Number of active auction listings found for this item in the latest snapshot.">?</span></th>
+                    <th>Quantity<span class="column-help" tabindex="0" title="Total quantity available across latest active listings for this item." aria-label="Total quantity available across latest active listings for this item.">?</span></th>
+                  </tr>
+                </thead>
+                <tbody id="items"></tbody>
+              </table>
+            </div>
+          </section>
         </div>
-      </section>
-      <section>
-        <div class="section-head"><h2>Recommendations</h2></div>
-        <div class="recommendations" id="recommendations"></div>
-      </section>
-      <section>
-        <div class="section-head"><h2>Recent Runs</h2></div>
-        <div class="runs" id="runs"></div>
-      </section>
+        <div class="stack">
+          <section>
+            <div class="section-head"><h2 id="chart-title">Price History</h2></div>
+            <div class="side-body">
+              <canvas id="history" width="640" height="320"></canvas>
+              <div class="muted" id="chart-note">Select an item to inspect snapshot history.</div>
+            </div>
+          </section>
+          <section>
+            <div class="section-head"><h2>Recommendations</h2></div>
+            <div class="recommendations" id="recommendations"></div>
+          </section>
+          <section>
+            <div class="section-head"><h2>Recent Runs</h2></div>
+            <div class="runs" id="runs"></div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="player-panel" role="tabpanel" aria-labelledby="player-tab" data-panel="player">
+      <div class="player-grid">
+        <section>
+          <div class="section-head">
+            <h2>My Listings</h2>
+            <span class="muted" id="my-listings-note">-</span>
+          </div>
+          <div class="mini-table-wrap">
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th>Qty</th>
+                  <th>Unit</th>
+                  <th>Buyout</th>
+                  <th>Seen</th>
+                </tr>
+              </thead>
+              <tbody id="my-listings-table"></tbody>
+            </table>
+          </div>
+        </section>
+        <section>
+          <div class="section-head"><h2>Buy Signals</h2></div>
+          <div class="mini-table-wrap">
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th>Qty</th>
+                  <th>Unit</th>
+                  <th>Target</th>
+                  <th>Profit</th>
+                </tr>
+              </thead>
+              <tbody id="buy-signals-table"></tbody>
+            </table>
+          </div>
+        </section>
+        <section>
+          <div class="section-head"><h2>Auction Outcomes</h2></div>
+          <div class="mini-table-wrap">
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th>Qty</th>
+                  <th>Outcome</th>
+                  <th>Money</th>
+                  <th>Seen</th>
+                </tr>
+              </thead>
+              <tbody id="auction-outcomes-table"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
     </div>
   </main>
   <script>
+    const AUTO_REFRESH_MS = 30000;
     let overview = null;
     let selectedItemId = null;
+    let isLoadingOverview = false;
+    let autoRefreshTimer = null;
 
     const els = {
       dbSize: document.getElementById('db-size'),
@@ -880,13 +1175,23 @@ DASHBOARD_HTML = """<!doctype html>
       latestRun: document.getElementById('latest-run'),
       newListings: document.getElementById('new-listings'),
       missingListings: document.getElementById('missing-listings'),
+      myListings: document.getElementById('my-listings'),
+      buySignals: document.getElementById('buy-signals'),
       latestTime: document.getElementById('latest-time'),
       items: document.getElementById('items'),
       recommendations: document.getElementById('recommendations'),
+      myListingsNote: document.getElementById('my-listings-note'),
+      myListingsTable: document.getElementById('my-listings-table'),
+      buySignalsTable: document.getElementById('buy-signals-table'),
+      auctionOutcomesTable: document.getElementById('auction-outcomes-table'),
       runs: document.getElementById('runs'),
       filter: document.getElementById('filter'),
       timezone: document.getElementById('timezone'),
+      autoRefresh: document.getElementById('auto-refresh'),
+      devModeStatus: document.getElementById('dev-mode-status'),
       refresh: document.getElementById('refresh'),
+      tabButtons: Array.from(document.querySelectorAll('[data-tab]')),
+      tabPanels: Array.from(document.querySelectorAll('[data-panel]')),
       chart: document.getElementById('history'),
       chartTitle: document.getElementById('chart-title'),
       chartNote: document.getElementById('chart-note'),
@@ -900,6 +1205,10 @@ DASHBOARD_HTML = """<!doctype html>
 
     function integer(value) {
       return Number(value || 0).toLocaleString();
+    }
+
+    function itemName(value) {
+      return value || 'Unknown';
     }
 
     function bps(value) {
@@ -931,24 +1240,49 @@ DASHBOARD_HTML = """<!doctype html>
       return { text: `${diff > 0 ? '+' : ''}${gold(diff)}`, cls: diff > 0 ? 'delta-up' : 'delta-down' };
     }
 
-    function profit(buyPrice, sellPrice) {
-      if (buyPrice === null || buyPrice === undefined || sellPrice === null || sellPrice === undefined) {
+    function profit(value) {
+      if (value === null || value === undefined) {
         return { text: '-', cls: 'muted' };
       }
-      const value = sellPrice - buyPrice;
       return { text: gold(value), cls: value > 0 ? 'delta-down' : value < 0 ? 'delta-up' : 'muted' };
     }
 
-    async function loadOverview() {
+    function sellSourceLabel(source) {
+      const labels = {
+        probable_sold: 'sold'
+      };
+      return labels[source] || source || '';
+    }
+
+    function sellSourceBadge(source) {
+      const label = sellSourceLabel(source);
+      if (!label) return '';
+      const cls = source === 'probable_sold' ? ' source-probable-sold' : '';
+      return `<span class="source-badge${cls}" title="Sell At source: ${label}">${label}</span>`;
+    }
+
+    async function loadOverview({ refreshSelected = true } = {}) {
+      if (isLoadingOverview) return;
+      isLoadingOverview = true;
       els.refresh.disabled = true;
-      const timezone = encodeURIComponent(els.timezone.value);
-      const response = await fetch(`/api/overview?timezone=${timezone}&t=${Date.now()}`, { cache: 'no-store' });
-      overview = await response.json();
-      renderOverview();
-      els.refreshStatus.textContent = `Refreshed ${new Date().toLocaleTimeString()}`;
-      els.refresh.disabled = false;
-      const first = overview.items[0];
-      if (!selectedItemId && first) selectItem(first.item_id);
+      try {
+        const timezone = encodeURIComponent(els.timezone.value);
+        const response = await fetch(`/api/overview?timezone=${timezone}&t=${Date.now()}`, { cache: 'no-store' });
+        overview = await response.json();
+        renderOverview();
+        els.refreshStatus.textContent = `Refreshed ${new Date().toLocaleTimeString()}`;
+        const first = overview.items[0];
+        if (!selectedItemId && first) {
+          await selectItem(first.item_id);
+        } else if (refreshSelected && selectedItemId) {
+          await loadItemHistory(selectedItemId);
+        }
+      } catch (error) {
+        els.refreshStatus.textContent = 'Refresh failed';
+      } finally {
+        els.refresh.disabled = false;
+        isLoadingOverview = false;
+      }
     }
 
     function renderOverview() {
@@ -958,9 +1292,13 @@ DASHBOARD_HTML = """<!doctype html>
       els.latestRun.textContent = overview.latest_run ? `#${overview.latest_run.id}` : '-';
       els.newListings.textContent = integer(overview.latest_lifecycle.new);
       els.missingListings.textContent = integer(overview.latest_lifecycle.missing);
+      els.myListings.textContent = integer(overview.player_activity?.summary?.listing_count);
+      els.buySignals.textContent = integer(overview.player_activity?.summary?.buy_opportunity_count);
       els.latestTime.textContent = overview.latest_run ? shortTime(overview.latest_run.finished_at) : '-';
+      document.body.classList.toggle('dev-mode-active', Boolean(overview.dev_mode));
       renderItems();
       renderRecommendations();
+      renderPlayerActivity();
       renderRuns();
     }
 
@@ -971,7 +1309,7 @@ DASHBOARD_HTML = """<!doctype html>
       });
       els.items.innerHTML = rows.map((item) => {
         const change = delta(item.min_unit_price, item.previous_min_unit_price);
-        const potentialProfit = profit(item.recommended_buy_price, item.recommended_sell_price);
+        const potentialProfit = profit(item.estimated_profit_unit_price);
         const sellThroughBps = item.average_sell_through_ratio_bps ?? item.sell_through_ratio_bps;
         const rowClasses = [
           item.item_id === selectedItemId ? 'selected' : '',
@@ -980,16 +1318,15 @@ DASHBOARD_HTML = """<!doctype html>
         const classAttribute = rowClasses ? ` class="${rowClasses}"` : '';
         const icon = item.icon_url ? `<img class="item-icon" src="${item.icon_url}" alt="">` : '';
         const subtitle = [item.item_class, item.item_subclass].filter(Boolean).join(' / ');
+        const devMarker = item.dev_buy_opportunity ? '<span class="dev-marker">Dev</span>' : '';
         return `<tr${classAttribute} data-item-id="${item.item_id}">
-          <td><span class="item-cell">${icon}<span class="item-meta"><span>${item.name}</span><small>${subtitle}</small></span></span></td>
+          <td><span class="item-cell">${icon}<span class="item-meta"><span>${item.name}${devMarker}</span><small>${subtitle}</small></span></span></td>
           <td><span class="quality-badge ${qualityClass(item.crafting_quality)}">${qualityLabel(item.crafting_quality)}</span></td>
           <td>${item.item_id}</td>
           <td>${gold(item.min_unit_price)}</td>
-          <td>${gold(item.first_quartile_unit_price)}</td>
-          <td>${gold(item.median_unit_price)}</td>
-          <td>${gold(item.third_quartile_unit_price)}</td>
           <td>${gold(item.recommended_buy_price)}</td>
-          <td>${gold(item.recommended_sell_price)}</td>
+          <td>${gold(item.recommended_sell_price)}${sellSourceBadge(item.recommended_sell_price_source)}</td>
+          <td>${gold(item.auction_deposit_unit_price)}</td>
           <td class="${potentialProfit.cls}">${potentialProfit.text}</td>
           <td>${bps(sellThroughBps)}</td>
           <td class="${change.cls}">${change.text}</td>
@@ -1029,7 +1366,7 @@ DASHBOARD_HTML = """<!doctype html>
             <strong title="${item.name}">${item.name}</strong>
             <span class="score">${item.score}</span>
           </div>
-          <div class="reasons">${gold(item.recommended_buy_price)} buy, ${gold(item.recommended_sell_price)} sell, ${item.confidence}% confidence</div>
+          <div class="reasons">${gold(item.recommended_buy_price)} buy, ${gold(item.recommended_sell_price)} sell (${sellSourceLabel(item.recommended_sell_price_source) || 'unknown'}), ${gold(item.auction_deposit_unit_price)} deposit, ${gold(item.estimated_profit_unit_price)} net, ${item.confidence}% confidence</div>
           ${timing}
           <div class="reasons">${item.reasons.join('; ')}</div>
         </div>`;
@@ -1039,10 +1376,65 @@ DASHBOARD_HTML = """<!doctype html>
       });
     }
 
+    function renderPlayerActivity() {
+      const activity = overview.player_activity || {};
+      const latestImport = activity.latest_import;
+      els.myListingsNote.textContent = latestImport ? shortTime(latestImport.imported_at) : 'No imports';
+
+      const listings = activity.listings || [];
+      els.myListingsTable.innerHTML = listings.length ? listings.map((row) => {
+        return `<tr>
+          <td>${itemName(row.name)}<br><span class="muted">#${row.item_id || '-'}</span></td>
+          <td>${integer(row.quantity)}</td>
+          <td>${gold(row.unit_price)}</td>
+          <td>${gold(row.buyout)}</td>
+          <td>${shortTime(row.observed_at)}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="5" class="muted">No addon listings imported.</td></tr>';
+
+      const opportunities = activity.buy_opportunities || [];
+      els.buySignalsTable.innerHTML = opportunities.length ? opportunities.map((row) => {
+        const gain = profit(row.potential_profit);
+        return `<tr>
+          <td>${itemName(row.name)}<br><span class="muted">#${row.item_id}</span></td>
+          <td>${integer(row.quantity)}</td>
+          <td>${gold(row.unit_price)}</td>
+          <td>${gold(row.buy_target_unit_price)}</td>
+          <td class="${gain.cls}">${gain.text}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="5" class="muted">No buy signals recorded yet.</td></tr>';
+
+      const outcomes = activity.outcomes || [];
+      els.auctionOutcomesTable.innerHTML = outcomes.length ? outcomes.map((row) => {
+        return `<tr>
+          <td>${itemName(row.name)}<br><span class="muted">#${row.item_id || '-'}</span></td>
+          <td>${integer(row.item_count)}</td>
+          <td>${row.outcome || '-'}</td>
+          <td>${gold(row.money)}</td>
+          <td>${shortTime(row.observed_at)}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="5" class="muted">No auction outcomes imported.</td></tr>';
+    }
+
+    function setActiveTab(tabName) {
+      els.tabButtons.forEach((button) => {
+        const active = button.dataset.tab === tabName;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      els.tabPanels.forEach((panel) => {
+        panel.classList.toggle('active', panel.dataset.panel === tabName);
+      });
+    }
+
     async function selectItem(itemId) {
       selectedItemId = itemId;
       renderItems();
       renderRecommendations();
+      await loadItemHistory(itemId);
+    }
+
+    async function loadItemHistory(itemId) {
       const response = await fetch(`/api/history?item_id=${itemId}&t=${Date.now()}`, { cache: 'no-store' });
       const payload = await response.json();
       els.chartTitle.textContent = `${payload.item.name || 'Item ' + itemId} Price History`;
@@ -1065,11 +1457,7 @@ DASHBOARD_HTML = """<!doctype html>
       const pad = { left: 64, right: 18, top: 22, bottom: 42 };
       const width = canvas.width - pad.left - pad.right;
       const height = canvas.height - pad.top - pad.bottom;
-      const values = points.flatMap((row) => [
-        row.first_quartile_unit_price,
-        row.median_unit_price,
-        row.third_quartile_unit_price
-      ].filter(Boolean));
+      const values = points.map((row) => row.min_unit_price).filter(Boolean);
       const min = Math.min(...values);
       const max = Math.max(...values);
       const spread = Math.max(max - min, 1);
@@ -1090,15 +1478,9 @@ DASHBOARD_HTML = """<!doctype html>
       ctx.fillText(gold(max), 8, pad.top + 4);
       ctx.fillText(gold(min), 8, pad.top + height);
 
-      drawLine(ctx, points, x, y, 'first_quartile_unit_price', '#176b87');
-      drawLine(ctx, points, x, y, 'median_unit_price', '#8a5a1f');
-      drawLine(ctx, points, x, y, 'third_quartile_unit_price', '#476f3f');
+      drawLine(ctx, points, x, y, 'min_unit_price', '#176b87');
       ctx.fillStyle = '#176b87';
-      ctx.fillText('Q1', pad.left, canvas.height - 14);
-      ctx.fillStyle = '#8a5a1f';
-      ctx.fillText('Median', pad.left + 46, canvas.height - 14);
-      ctx.fillStyle = '#476f3f';
-      ctx.fillText('Q3', pad.left + 112, canvas.height - 14);
+      ctx.fillText('Min / Unit', pad.left, canvas.height - 14);
     }
 
     function drawLine(ctx, points, x, y, key, color) {
@@ -1119,11 +1501,30 @@ DASHBOARD_HTML = """<!doctype html>
       if (started) ctx.stroke();
     }
 
-    els.refresh.addEventListener('click', loadOverview);
-    els.timezone.addEventListener('change', loadOverview);
+    function startAutoRefresh() {
+      stopAutoRefresh();
+      if (!els.autoRefresh.checked) return;
+      autoRefreshTimer = setInterval(() => {
+        if (document.visibilityState === 'visible') loadOverview();
+      }, AUTO_REFRESH_MS);
+    }
+
+    function stopAutoRefresh() {
+      if (autoRefreshTimer !== null) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+      }
+    }
+
+    els.refresh.addEventListener('click', () => loadOverview());
+    els.timezone.addEventListener('change', () => loadOverview());
+    els.autoRefresh.addEventListener('change', startAutoRefresh);
     els.filter.addEventListener('input', renderItems);
-    loadOverview();
-    setInterval(loadOverview, 30000);
+    els.tabButtons.forEach((button) => {
+      button.addEventListener('click', () => setActiveTab(button.dataset.tab));
+    });
+    loadOverview({ refreshSelected: false });
+    startAutoRefresh();
   </script>
 </body>
 </html>

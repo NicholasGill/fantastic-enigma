@@ -4,11 +4,18 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from statistics import mean
+from statistics import mean, median
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.engine import make_url
+
+AUCTION_DEPOSIT_RATE_BPS_BY_DURATION_HOURS = {
+    12: 1500,
+    24: 3000,
+    48: 6000,
+}
+DEFAULT_AUCTION_DURATION_HOURS = 48
 
 
 @dataclass(frozen=True)
@@ -30,6 +37,9 @@ class RecommendationInputs:
     recent_quantity_drop_ratio: float
     average_sell_through_ratio: float
     average_sell_through_confidence: int
+    average_probable_sold_unit_price: int | None
+    vendor_sell_unit_price: int | None
+    auction_deposit_unit_price: int | None
     player_post_count: int
     player_sold_count: int
     player_expired_count: int
@@ -55,6 +65,7 @@ class Recommendation:
     latest_median_unit_price: int | None
     recommended_buy_price: int | None
     recommended_sell_price: int | None
+    recommended_sell_price_source: str | None
     average_first_quartile_unit_price: int | None
     average_median_unit_price: int | None
     average_third_quartile_unit_price: int | None
@@ -62,6 +73,10 @@ class Recommendation:
     estimated_demand_score: int
     average_sell_through_ratio: float
     average_sell_through_confidence: int
+    average_probable_sold_unit_price: int | None
+    vendor_sell_unit_price: int | None
+    auction_deposit_unit_price: int | None
+    estimated_profit_unit_price: int | None
     player_post_count: int
     player_sold_count: int
     player_expired_count: int
@@ -85,16 +100,25 @@ class RecommendationEngine:
         database_url: str,
         *,
         lookback_runs: int = 12,
+        sell_price_lookback_runs: int = 48,
+        auction_duration_hours: int = DEFAULT_AUCTION_DURATION_HOURS,
         min_snapshots: int = 3,
         display_timezone: str = DEFAULT_DISPLAY_TIMEZONE,
     ) -> None:
         if lookback_runs <= 1:
             raise ValueError("lookback_runs must be greater than 1")
+        if sell_price_lookback_runs <= 1:
+            raise ValueError("sell_price_lookback_runs must be greater than 1")
+        if auction_duration_hours not in AUCTION_DEPOSIT_RATE_BPS_BY_DURATION_HOURS:
+            durations = ", ".join(str(duration) for duration in sorted(AUCTION_DEPOSIT_RATE_BPS_BY_DURATION_HOURS))
+            raise ValueError(f"auction_duration_hours must be one of: {durations}")
         if min_snapshots <= 0:
             raise ValueError("min_snapshots must be greater than 0")
 
         self.database_path = _sqlite_database_path(database_url)
         self.lookback_runs = lookback_runs
+        self.sell_price_lookback_runs = sell_price_lookback_runs
+        self.auction_duration_hours = auction_duration_hours
         self.min_snapshots = min_snapshots
         self.display_timezone = _display_timezone(display_timezone)
 
@@ -111,9 +135,14 @@ class RecommendationEngine:
             connection.row_factory = sqlite3.Row
             item_rows = connection.execute(
                 """
-                select item_id, coalesce(name, 'Item ' || item_id) as name, market
-                from tracked_items
-                order by item_id
+                select
+                    t.item_id,
+                    coalesce(m.name, t.name, 'Item ' || t.item_id) as name,
+                    t.market,
+                    m.sell_price
+                from tracked_items t
+                left join item_metadata m on m.item_id = t.item_id
+                order by t.item_id
                 """
             ).fetchall()
             return [self._load_item_inputs(connection, row) for row in item_rows]
@@ -168,6 +197,7 @@ class RecommendationEngine:
             connection,
             int(item_row["item_id"]),
             self.lookback_runs,
+            self.sell_price_lookback_runs,
         )
         player_outcomes = _load_player_outcome_inputs(connection, int(item_row["item_id"]))
         timing = _load_historical_timing_inputs(
@@ -197,6 +227,12 @@ class RecommendationEngine:
             recent_quantity_drop_ratio=_recent_drop_ratio(quantities),
             average_sell_through_ratio=sell_through[0],
             average_sell_through_confidence=sell_through[1],
+            average_probable_sold_unit_price=sell_through[2],
+            vendor_sell_unit_price=_optional_int(item_row["sell_price"]),
+            auction_deposit_unit_price=_auction_deposit_unit_price(
+                _optional_int(item_row["sell_price"]),
+                self.auction_duration_hours,
+            ),
             player_post_count=player_outcomes["post_count"],
             player_sold_count=player_outcomes["sold_count"],
             player_expired_count=player_outcomes["expired_count"],
@@ -223,6 +259,7 @@ class RecommendationEngine:
                 latest_median_unit_price=inputs.latest_median_unit_price,
                 recommended_buy_price=_recommended_buy_price(inputs),
                 recommended_sell_price=_recommended_sell_price(inputs),
+                recommended_sell_price_source=_recommended_sell_price_source(inputs),
                 average_first_quartile_unit_price=inputs.average_first_quartile_unit_price,
                 average_median_unit_price=inputs.average_median_unit_price,
                 average_third_quartile_unit_price=inputs.average_third_quartile_unit_price,
@@ -230,6 +267,10 @@ class RecommendationEngine:
                 estimated_demand_score=0,
                 average_sell_through_ratio=inputs.average_sell_through_ratio,
                 average_sell_through_confidence=inputs.average_sell_through_confidence,
+                average_probable_sold_unit_price=inputs.average_probable_sold_unit_price,
+                vendor_sell_unit_price=inputs.vendor_sell_unit_price,
+                auction_deposit_unit_price=inputs.auction_deposit_unit_price,
+                estimated_profit_unit_price=_estimated_profit_unit_price(inputs),
                 player_post_count=inputs.player_post_count,
                 player_sold_count=inputs.player_sold_count,
                 player_expired_count=inputs.player_expired_count,
@@ -269,6 +310,7 @@ class RecommendationEngine:
             latest_median_unit_price=inputs.latest_median_unit_price,
             recommended_buy_price=_recommended_buy_price(inputs),
             recommended_sell_price=_recommended_sell_price(inputs),
+            recommended_sell_price_source=_recommended_sell_price_source(inputs),
             average_first_quartile_unit_price=inputs.average_first_quartile_unit_price,
             average_median_unit_price=inputs.average_median_unit_price,
             average_third_quartile_unit_price=inputs.average_third_quartile_unit_price,
@@ -276,6 +318,10 @@ class RecommendationEngine:
             estimated_demand_score=max(0, min(demand_score, 100)),
             average_sell_through_ratio=inputs.average_sell_through_ratio,
             average_sell_through_confidence=inputs.average_sell_through_confidence,
+            average_probable_sold_unit_price=inputs.average_probable_sold_unit_price,
+            vendor_sell_unit_price=inputs.vendor_sell_unit_price,
+            auction_deposit_unit_price=inputs.auction_deposit_unit_price,
+            estimated_profit_unit_price=_estimated_profit_unit_price(inputs),
             player_post_count=inputs.player_post_count,
             player_sold_count=inputs.player_sold_count,
             player_expired_count=inputs.player_expired_count,
@@ -303,6 +349,9 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "latest_median_unit_price": recommendation.latest_median_unit_price,
         "recommended_buy_price": recommendation.recommended_buy_price,
         "recommended_sell_price": recommendation.recommended_sell_price,
+        "recommended_buy_unit_price": recommendation.recommended_buy_price,
+        "recommended_sell_unit_price": recommendation.recommended_sell_price,
+        "recommended_sell_price_source": recommendation.recommended_sell_price_source,
         "average_first_quartile_unit_price": recommendation.average_first_quartile_unit_price,
         "average_median_unit_price": recommendation.average_median_unit_price,
         "average_third_quartile_unit_price": recommendation.average_third_quartile_unit_price,
@@ -310,6 +359,10 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "estimated_demand_score": recommendation.estimated_demand_score,
         "average_sell_through_ratio": recommendation.average_sell_through_ratio,
         "average_sell_through_confidence": recommendation.average_sell_through_confidence,
+        "average_probable_sold_unit_price": recommendation.average_probable_sold_unit_price,
+        "vendor_sell_unit_price": recommendation.vendor_sell_unit_price,
+        "auction_deposit_unit_price": recommendation.auction_deposit_unit_price,
+        "estimated_profit_unit_price": recommendation.estimated_profit_unit_price,
         "player_post_count": recommendation.player_post_count,
         "player_sold_count": recommendation.player_sold_count,
         "player_expired_count": recommendation.player_expired_count,
@@ -340,22 +393,43 @@ def _price_discount_score(latest_min: int | None, average_median: int | None) ->
 
 
 def _recommended_sell_price(inputs: RecommendationInputs) -> int | None:
-    return (
-        inputs.average_first_quartile_unit_price
-        or inputs.average_median_unit_price
-        or inputs.latest_median_unit_price
-    )
+    return inputs.average_probable_sold_unit_price
+
+
+def _recommended_sell_price_source(inputs: RecommendationInputs) -> str | None:
+    if inputs.average_probable_sold_unit_price is not None:
+        return "probable_sold"
+    return None
 
 
 def _recommended_buy_price(inputs: RecommendationInputs) -> int | None:
     sell_price = _recommended_sell_price(inputs)
     if sell_price is None:
-        return inputs.latest_min_unit_price
+        return None
 
-    target_buy_price = round(sell_price * 0.8)
+    deposit = inputs.auction_deposit_unit_price or 0
+    target_buy_price = round(max(sell_price - deposit, 0) * 0.8)
     if inputs.latest_min_unit_price is not None and inputs.latest_min_unit_price <= target_buy_price:
         return inputs.latest_min_unit_price
     return target_buy_price
+
+
+def _estimated_profit_unit_price(inputs: RecommendationInputs) -> int | None:
+    buy_price = _recommended_buy_price(inputs)
+    sell_price = _recommended_sell_price(inputs)
+    if buy_price is None or sell_price is None:
+        return None
+    return sell_price - buy_price - (inputs.auction_deposit_unit_price or 0)
+
+
+def _auction_deposit_unit_price(vendor_sell_price: int | None, duration_hours: int) -> int | None:
+    if vendor_sell_price is None:
+        return None
+    return vendor_sell_price * AUCTION_DEPOSIT_RATE_BPS_BY_DURATION_HOURS[duration_hours] // 10000
+
+
+def _optional_int(value: Any) -> int | None:
+    return int(value) if value is not None else None
 
 
 def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
@@ -379,13 +453,14 @@ def _load_sell_through_inputs(
     connection: sqlite3.Connection,
     item_id: int,
     lookback_runs: int,
-) -> tuple[float, int]:
+    sell_price_lookback_runs: int,
+) -> tuple[float, int, int | None]:
     if not _table_exists(connection, "sell_through_metrics"):
-        return (0.0, 0)
+        return (0.0, 0, None)
 
     rows = connection.execute(
         """
-        select sell_through_ratio_bps, confidence
+        select sell_through_ratio_bps, confidence, probable_sold_average_unit_price
         from sell_through_metrics s
         join fetch_runs r on r.id = s.fetch_run_id
         where s.item_id = ? and r.status = 'success'
@@ -395,12 +470,44 @@ def _load_sell_through_inputs(
         (item_id, lookback_runs),
     ).fetchall()
     if not rows:
-        return (0.0, 0)
+        return (0.0, 0, None)
+
+    probable_sold_rows = connection.execute(
+        """
+        select probable_sold_average_unit_price
+        from sell_through_metrics s
+        join fetch_runs r on r.id = s.fetch_run_id
+        where s.item_id = ?
+            and r.status = 'success'
+            and s.probable_sold_average_unit_price is not null
+        order by s.fetch_run_id desc
+        limit ?
+        """,
+        (item_id, sell_price_lookback_runs),
+    ).fetchall()
+    probable_sold_prices = _without_price_outliers(
+        [int(row["probable_sold_average_unit_price"]) for row in probable_sold_rows]
+    )
 
     return (
         mean(int(row["sell_through_ratio_bps"]) / 10000 for row in rows),
         round(mean(int(row["confidence"]) for row in rows)),
+        int(mean(probable_sold_prices)) if probable_sold_prices else None,
     )
+
+
+def _without_price_outliers(prices: list[int]) -> list[int]:
+    if len(prices) < 3:
+        return prices
+    midpoint = median(prices)
+    if midpoint <= 0:
+        return prices
+    filtered = [
+        price
+        for price in prices
+        if midpoint * 0.5 <= price <= midpoint * 2
+    ]
+    return filtered or prices
 
 
 def _load_player_outcome_inputs(connection: sqlite3.Connection, item_id: int) -> dict[str, Any]:

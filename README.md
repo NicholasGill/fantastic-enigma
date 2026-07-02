@@ -76,9 +76,9 @@ Open `http://127.0.0.1:8000` to inspect database size, snapshot counts, latest
 item summaries, recommendations, recent runs, and per-item price history. Use
 `--port` if port 8000 is already in use.
 
-Price summaries include minimum, first quartile, median, and third quartile unit
-prices. The dashboard history chart uses the quartile band for scale so extreme
-listings do not dominate the presentation.
+Stored price summaries include minimum, first quartile, median, and third
+quartile unit prices. The dashboard emphasizes minimum, buy, sell, deposit, and
+net profit per unit so the active view stays focused on flip decisions.
 
 Snapshot fetches also collect missing item metadata from Blizzard's item and
 media endpoints, including item quality, class, subclass, stackability, vendor
@@ -130,10 +130,15 @@ auction APIs expose current listings, not completed purchases, so imported
 personal sale and expiry signals are preferred over inferred market
 sell-through once enough personal history exists.
 
-Recommendation output includes a recommended sell price. This is a conservative
-target based on recent average first-quartile unit price when available, falling
-back to recent median price. It is meant to avoid pricing from extreme outlier
-listings.
+Recommendation output includes a recommended per-unit sell price when there is
+inferred sale evidence. It uses the average unit price of disappeared listings
+classified as probable sales and listings whose observed quantity decreased
+between snapshots. If no inferred sale evidence exists, the sell price is left
+blank instead of falling back to quartiles or medians.
+
+Profit estimates subtract the estimated 48-hour auction deposit per unit from
+the sell-minus-buy spread. The deposit estimate uses Blizzard item metadata's
+vendor sell price field and the standard 48-hour deposit rate.
 
 ## Companion Addon
 

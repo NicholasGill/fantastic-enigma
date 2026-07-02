@@ -8,6 +8,7 @@ from typing import Iterable
 from sqlalchemy import (
     Boolean,
     DateTime,
+    delete,
     ForeignKey,
     Integer,
     MetaData,
@@ -23,6 +24,7 @@ from wow_auction_tracker.auction import AuctionListing, ItemHistoryMetric, ItemS
 from wow_auction_tracker.config import Market, TrackerConfig, TrackedItem
 from wow_auction_tracker.features.lifecycle import ListingObservation, ListingSnapshot, listing_key_from_parts
 from wow_auction_tracker.features.metadata import ItemMetadata
+from wow_auction_tracker.features.opportunities import BuyOpportunityObservation
 from wow_auction_tracker.features.player import AddonImportResult, PlayerAuctionOutcome, PlayerAuctionPost
 from wow_auction_tracker.features.sellthrough import SellThroughMetric
 
@@ -49,6 +51,7 @@ class FetchRun(Base):
     history_metrics: Mapped[list[ItemHistoryMetricRecord]] = relationship(back_populates="fetch_run")
     listing_observations: Mapped[list[ListingObservationRecord]] = relationship(back_populates="fetch_run")
     sell_through_metrics: Mapped[list[SellThroughMetricRecord]] = relationship(back_populates="fetch_run")
+    buy_opportunity_observations: Mapped[list[BuyOpportunityObservationRecord]] = relationship(back_populates="fetch_run")
 
 
 class AddonImportRecord(Base):
@@ -158,6 +161,7 @@ class ListingObservationRecord(Base):
     item_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     market: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    inferred_outcome: Mapped[str | None] = mapped_column(String(32), index=True)
     quantity: Mapped[int | None] = mapped_column(Integer)
     previous_quantity: Mapped[int | None] = mapped_column(Integer)
     unit_price: Mapped[int | None] = mapped_column(Integer)
@@ -182,12 +186,38 @@ class SellThroughMetricRecord(Base):
     disappeared_listing_count: Mapped[int] = mapped_column(Integer, nullable=False)
     disappeared_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     disappeared_value: Mapped[int | None] = mapped_column(Integer)
+    probable_sold_listing_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    probable_sold_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    probable_sold_value: Mapped[int | None] = mapped_column(Integer)
+    probable_sold_average_unit_price: Mapped[int | None] = mapped_column(Integer)
     observed_listing_count: Mapped[int] = mapped_column(Integer, nullable=False)
     observed_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     sell_through_ratio_bps: Mapped[int] = mapped_column(Integer, nullable=False)
     confidence: Mapped[int] = mapped_column(Integer, nullable=False)
 
     fetch_run: Mapped[FetchRun] = relationship(back_populates="sell_through_metrics")
+
+
+class BuyOpportunityObservationRecord(Base):
+    __tablename__ = "buy_opportunity_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fetch_run_id: Mapped[int] = mapped_column(ForeignKey("fetch_runs.id"), nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    item_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    market: Mapped[str] = mapped_column(String(32), nullable=False)
+    auction_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    buy_target_unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    sell_target_unit_price: Mapped[int | None] = mapped_column(Integer)
+    potential_profit: Mapped[int | None] = mapped_column(Integer)
+    available_quantity_at_or_below_buy_target: Mapped[int] = mapped_column(Integer, nullable=False)
+    recommendation_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    recommendation_confidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    listing_status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    fetch_run: Mapped[FetchRun] = relationship(back_populates="buy_opportunity_observations")
 
 
 class PlayerAuctionPostRecord(Base):
@@ -277,6 +307,7 @@ class AuctionRepository:
         history_metrics: Iterable[ItemHistoryMetric] = (),
         listing_observations: Iterable[ListingObservation] = (),
         sell_through_metrics: Iterable[SellThroughMetric] = (),
+        buy_opportunity_observations: Iterable[BuyOpportunityObservation] = (),
     ) -> None:
         with Session(self.engine) as session:
             run = session.get(FetchRun, fetch_run_id)
@@ -340,6 +371,7 @@ class AuctionRepository:
                         item_id=observation.item_id,
                         market=observation.market,
                         status=observation.status,
+                        inferred_outcome=observation.inferred_outcome,
                         quantity=observation.quantity,
                         previous_quantity=observation.previous_quantity,
                         unit_price=observation.unit_price,
@@ -362,10 +394,36 @@ class AuctionRepository:
                         disappeared_listing_count=metric.disappeared_listing_count,
                         disappeared_quantity=metric.disappeared_quantity,
                         disappeared_value=metric.disappeared_value,
+                        probable_sold_listing_count=metric.probable_sold_listing_count,
+                        probable_sold_quantity=metric.probable_sold_quantity,
+                        probable_sold_value=metric.probable_sold_value,
+                        probable_sold_average_unit_price=metric.probable_sold_average_unit_price,
                         observed_listing_count=metric.observed_listing_count,
                         observed_quantity=metric.observed_quantity,
                         sell_through_ratio_bps=round(metric.sell_through_ratio * 10000),
                         confidence=metric.confidence,
+                    )
+                )
+
+            for opportunity in buy_opportunity_observations:
+                session.add(
+                    BuyOpportunityObservationRecord(
+                        fetch_run_id=fetch_run_id,
+                        observed_at=run.started_at,
+                        item_id=opportunity.item_id,
+                        market=opportunity.market,
+                        auction_id=opportunity.auction_id,
+                        unit_price=opportunity.unit_price,
+                        quantity=opportunity.quantity,
+                        buy_target_unit_price=opportunity.buy_target_unit_price,
+                        sell_target_unit_price=opportunity.sell_target_unit_price,
+                        potential_profit=opportunity.potential_profit,
+                        available_quantity_at_or_below_buy_target=(
+                            opportunity.available_quantity_at_or_below_buy_target
+                        ),
+                        recommendation_score=opportunity.recommendation_score,
+                        recommendation_confidence=opportunity.recommendation_confidence,
+                        listing_status=opportunity.listing_status,
                     )
                 )
 
@@ -411,6 +469,105 @@ class AuctionRepository:
                 .order_by(FetchRun.id.desc())
                 .limit(1)
             )
+
+    def fetch_run_started_at(self, fetch_run_id: int) -> datetime | None:
+        with Session(self.engine) as session:
+            return session.scalar(select(FetchRun.started_at).where(FetchRun.id == fetch_run_id))
+
+    def successful_fetch_run_ids(self) -> list[int]:
+        with Session(self.engine) as session:
+            return list(
+                session.scalars(
+                    select(FetchRun.id)
+                    .where(FetchRun.status == "success")
+                    .order_by(FetchRun.id)
+                ).all()
+            )
+
+    def list_auction_listings(self, fetch_run_id: int) -> list[AuctionListing]:
+        with Session(self.engine) as session:
+            rows = session.scalars(
+                select(AuctionListingRecord).where(AuctionListingRecord.fetch_run_id == fetch_run_id)
+            ).all()
+            return [
+                AuctionListing(
+                    auction_id=row.auction_id,
+                    item_id=row.item_id,
+                    market=Market(row.market),
+                    quantity=row.quantity,
+                    unit_price=row.unit_price,
+                    buyout=row.buyout,
+                    bid=row.bid,
+                    time_left=row.time_left,
+                    raw=json.loads(row.raw_json),
+                )
+                for row in rows
+            ]
+
+    def replace_inference(
+        self,
+        fetch_run_id: int,
+        listing_observations: Iterable[ListingObservation],
+        sell_through_metrics: Iterable[SellThroughMetric],
+    ) -> None:
+        with self.engine.begin() as connection:
+            run_exists = connection.scalar(select(FetchRun.id).where(FetchRun.id == fetch_run_id))
+            if run_exists is None:
+                raise ValueError(f"fetch run {fetch_run_id} does not exist")
+
+            connection.execute(
+                delete(ListingObservationRecord).where(ListingObservationRecord.fetch_run_id == fetch_run_id)
+            )
+            connection.execute(
+                delete(SellThroughMetricRecord).where(SellThroughMetricRecord.fetch_run_id == fetch_run_id)
+            )
+
+            observation_rows = [
+                {
+                        "fetch_run_id": fetch_run_id,
+                        "observation_key": observation.observation_key,
+                        "auction_id": observation.auction_id,
+                        "item_id": observation.item_id,
+                        "market": observation.market,
+                        "status": observation.status,
+                        "inferred_outcome": observation.inferred_outcome,
+                        "quantity": observation.quantity,
+                        "previous_quantity": observation.previous_quantity,
+                        "unit_price": observation.unit_price,
+                        "previous_unit_price": observation.previous_unit_price,
+                        "buyout": observation.buyout,
+                        "previous_buyout": observation.previous_buyout,
+                        "bid": observation.bid,
+                        "previous_bid": observation.previous_bid,
+                        "time_left": observation.time_left,
+                        "previous_time_left": observation.previous_time_left,
+                }
+                for observation in listing_observations
+            ]
+            if observation_rows:
+                connection.execute(ListingObservationRecord.__table__.insert(), observation_rows)
+
+            metric_rows = [
+                {
+                        "fetch_run_id": fetch_run_id,
+                        "item_id": metric.item_id,
+                        "market": metric.market,
+                        "disappeared_listing_count": metric.disappeared_listing_count,
+                        "disappeared_quantity": metric.disappeared_quantity,
+                        "disappeared_value": metric.disappeared_value,
+                        "probable_sold_listing_count": metric.probable_sold_listing_count,
+                        "probable_sold_quantity": metric.probable_sold_quantity,
+                        "probable_sold_value": metric.probable_sold_value,
+                        "probable_sold_average_unit_price": metric.probable_sold_average_unit_price,
+                        "observed_listing_count": metric.observed_listing_count,
+                        "observed_quantity": metric.observed_quantity,
+                        "sell_through_ratio_bps": round(metric.sell_through_ratio * 10000),
+                        "confidence": metric.confidence,
+                }
+                for metric in sell_through_metrics
+            ]
+            if metric_rows:
+                connection.execute(SellThroughMetricRecord.__table__.insert(), metric_rows)
 
     def list_listing_snapshots(self, fetch_run_id: int) -> list[ListingSnapshot]:
         with Session(self.engine) as session:
@@ -573,16 +730,32 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
                 "third_quartile_unit_price": "integer",
             },
         )
+        _ensure_sqlite_columns(
+            connection,
+            "listing_observations",
+            {
+                "inferred_outcome": "varchar(32)",
+            },
+        )
+        connection.exec_driver_sql(
+            "create index if not exists ix_listing_observations_inferred_outcome "
+            "on listing_observations (inferred_outcome)"
+        )
         connection.exec_driver_sql(
             """
             create table if not exists sell_through_metrics (
                 id integer primary key,
                 fetch_run_id integer not null,
+                observed_at datetime not null,
                 item_id integer not null,
                 market varchar(32) not null,
                 disappeared_listing_count integer not null,
                 disappeared_quantity integer not null,
                 disappeared_value integer,
+                probable_sold_listing_count integer not null default 0,
+                probable_sold_quantity integer not null default 0,
+                probable_sold_value integer,
+                probable_sold_average_unit_price integer,
                 observed_listing_count integer not null,
                 observed_quantity integer not null,
                 sell_through_ratio_bps integer not null,
@@ -596,6 +769,54 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
         )
         connection.exec_driver_sql(
             "create index if not exists ix_sell_through_metrics_item_id on sell_through_metrics (item_id)"
+        )
+        _ensure_sqlite_columns(
+            connection,
+            "sell_through_metrics",
+            {
+                "probable_sold_listing_count": "integer not null default 0",
+                "probable_sold_quantity": "integer not null default 0",
+                "probable_sold_value": "integer",
+                "probable_sold_average_unit_price": "integer",
+            },
+        )
+        connection.exec_driver_sql(
+            """
+            create table if not exists buy_opportunity_observations (
+                id integer primary key,
+                fetch_run_id integer not null,
+                observed_at datetime not null,
+                item_id integer not null,
+                market varchar(32) not null,
+                auction_id integer,
+                unit_price integer not null,
+                quantity integer not null,
+                buy_target_unit_price integer not null,
+                sell_target_unit_price integer,
+                potential_profit integer,
+                available_quantity_at_or_below_buy_target integer not null,
+                recommendation_score integer not null,
+                recommendation_confidence integer not null,
+                listing_status varchar(32) not null,
+                foreign key(fetch_run_id) references fetch_runs (id)
+            )
+            """
+        )
+        for column in ("fetch_run_id", "item_id", "auction_id"):
+            connection.exec_driver_sql(
+                f"create index if not exists ix_buy_opportunity_observations_{column} "
+                f"on buy_opportunity_observations ({column})"
+            )
+        _ensure_sqlite_columns(
+            connection,
+            "buy_opportunity_observations",
+            {
+                "observed_at": "datetime",
+            },
+        )
+        connection.exec_driver_sql(
+            "create index if not exists ix_buy_opportunity_observations_observed_at "
+            "on buy_opportunity_observations (observed_at)"
         )
         connection.exec_driver_sql(
             """

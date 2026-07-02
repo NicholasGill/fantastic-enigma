@@ -11,10 +11,12 @@ from sqlalchemy.engine import make_url
 from wow_auction_tracker.clients.blizzard import BlizzardClient
 from wow_auction_tracker.config import load_config
 from wow_auction_tracker.features.dashboard import DashboardConfig, serve_dashboard
+from wow_auction_tracker.features.lifecycle import build_listing_observations
 from wow_auction_tracker.features.player import import_saved_variables
 from wow_auction_tracker.features.recommendations import Recommendation, RecommendationEngine
 from wow_auction_tracker.features.dashboard import DashboardDataStore
 from wow_auction_tracker.features.scheduler import run_snapshot_schedule
+from wow_auction_tracker.features.sellthrough import build_sell_through_metrics
 from wow_auction_tracker.features.snapshots import FetchResult, fetch_and_store
 from wow_auction_tracker.storage import AuctionRepository, create_db_engine, init_db
 
@@ -39,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init-db", help="Create database tables.")
+    subparsers.add_parser("recompute-inference", help="Recompute derived listing lifecycle and sell-through rows.")
     subparsers.add_parser("fetch", help="Fetch configured auction listings and store a snapshot.")
     dashboard_parser = subparsers.add_parser("dashboard", help="Start the local dashboard web server.")
     dashboard_parser.add_argument(
@@ -51,6 +54,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=8000,
         help="Dashboard port. Defaults to 8000.",
+    )
+    dashboard_parser.add_argument(
+        "--dev-mode",
+        action="store_true",
+        help="Show display-only dashboard demo states such as buy-opportunity highlighting.",
+    )
+    dashboard_parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Run the dashboard with Flask's development reloader.",
     )
     recommend_parser = subparsers.add_parser("recommend", help="Rank tracked items from snapshot history.")
     recommend_parser.add_argument(
@@ -162,12 +175,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Initialized database at {args.database_url}")
         return 0
 
+    if args.command == "recompute-inference":
+        repository = AuctionRepository(engine)
+        result = _recompute_inference(repository)
+        print(
+            "Recomputed inference for "
+            f"{result['run_count']} fetch runs: "
+            f"{result['observation_count']} observations, "
+            f"{result['sell_through_count']} sell-through rows"
+        )
+        return 0
+
     if args.command == "dashboard":
         serve_dashboard(
             DashboardConfig(
                 database_url=args.database_url,
                 host=args.host,
                 port=args.port,
+                dev_mode=args.dev_mode,
+                reload=args.reload,
             )
         )
         return 0
@@ -300,12 +326,52 @@ def _print_fetch_result(result: FetchResult, database_url: str) -> None:
     print(message)
 
 
+def _recompute_inference(repository: AuctionRepository) -> dict[str, int]:
+    run_ids = repository.successful_fetch_run_ids()
+    observation_count = 0
+    sell_through_count = 0
+    previous_run_id: int | None = None
+    for run_id in run_ids:
+        listings = repository.list_auction_listings(run_id)
+        previous_listings = repository.list_listing_snapshots(previous_run_id) if previous_run_id is not None else []
+        observations = build_listing_observations(
+            listings,
+            previous_listings,
+            elapsed_seconds=_elapsed_seconds_between_runs(repository, previous_run_id, run_id),
+        )
+        metrics = build_sell_through_metrics(observations)
+        repository.replace_inference(run_id, observations, metrics)
+        observation_count += len(observations)
+        sell_through_count += len(metrics)
+        previous_run_id = run_id
+
+    return {
+        "run_count": len(run_ids),
+        "observation_count": observation_count,
+        "sell_through_count": sell_through_count,
+    }
+
+
+def _elapsed_seconds_between_runs(
+    repository: AuctionRepository,
+    previous_fetch_run_id: int | None,
+    current_fetch_run_id: int,
+) -> int | None:
+    if previous_fetch_run_id is None:
+        return None
+    previous_started_at = repository.fetch_run_started_at(previous_fetch_run_id)
+    current_started_at = repository.fetch_run_started_at(current_fetch_run_id)
+    if previous_started_at is None or current_started_at is None:
+        return None
+    return max(0, round((current_started_at - previous_started_at).total_seconds()))
+
+
 def _print_recommendations(recommendations: list[Recommendation]) -> None:
     if not recommendations:
         print("No recommendations available")
         return
 
-    print("Action  Score  Conf  Item ID  Name                 Buy At    Sell At    Reasons")
+    print("Action  Score  Conf  Item ID  Name                 Buy/Unit  Sell/Unit  Deposit  Profit    Sell Source    Reasons")
     for item in recommendations:
         reasons = "; ".join(item.reasons)
         print(
@@ -316,6 +382,9 @@ def _print_recommendations(recommendations: list[Recommendation]) -> None:
             f"{item.name[:20]:<20} "
             f"{_format_copper(item.recommended_buy_price):>9} "
             f"{_format_copper(item.recommended_sell_price):>9}  "
+            f"{_format_copper(item.auction_deposit_unit_price):>7} "
+            f"{_format_copper(item.estimated_profit_unit_price):>8}  "
+            f"{(item.recommended_sell_price_source or '-'):<13} "
             f"{reasons}"
         )
 
@@ -326,7 +395,7 @@ def _print_latest_report(overview: dict[str, object], limit: int) -> None:
         print("No item summaries available")
         return
 
-    print("Item ID  Name                 Market      Listings  Quantity  Min       Q1        Median    Q3        Confidence  Action")
+    print("Item ID  Name                 Market      Listings  Quantity  Min/Unit  Q1/Unit   Med/Unit  Q3/Unit   Confidence  Action")
     for item in items[:limit]:
         if not isinstance(item, dict):
             continue
@@ -356,7 +425,7 @@ def _print_item_report(item_history: dict[str, object]) -> None:
         return
 
     print(f"{item.get('name', 'Unknown')} ({item.get('item_id')})")
-    print("Run ID  Started At            Listings  Quantity  Min       Q1        Median    Q3")
+    print("Run ID  Started At            Listings  Quantity  Min/Unit  Q1/Unit   Med/Unit  Q3/Unit")
     for row in history:
         if not isinstance(row, dict):
             continue
@@ -395,6 +464,12 @@ _LATEST_EXPORT_FIELDNAMES = [
     "recommendation_confidence",
     "recommended_buy_price",
     "recommended_sell_price",
+    "recommended_buy_unit_price",
+    "recommended_sell_unit_price",
+    "recommended_sell_price_source",
+    "vendor_sell_unit_price",
+    "auction_deposit_unit_price",
+    "estimated_profit_unit_price",
     "best_buy_time",
     "best_sell_time",
     "historical_buy_price",
@@ -429,6 +504,12 @@ _RECOMMENDATION_EXPORT_FIELDNAMES = [
     "latest_median_unit_price",
     "recommended_buy_price",
     "recommended_sell_price",
+    "recommended_buy_unit_price",
+    "recommended_sell_unit_price",
+    "recommended_sell_price_source",
+    "vendor_sell_unit_price",
+    "auction_deposit_unit_price",
+    "estimated_profit_unit_price",
     "average_first_quartile_unit_price",
     "average_median_unit_price",
     "average_third_quartile_unit_price",
@@ -436,6 +517,7 @@ _RECOMMENDATION_EXPORT_FIELDNAMES = [
     "estimated_demand_score",
     "average_sell_through_ratio",
     "average_sell_through_confidence",
+    "average_probable_sold_unit_price",
     "player_post_count",
     "player_sold_count",
     "player_expired_count",
@@ -508,6 +590,12 @@ def _latest_rows_for_export(overview: dict[str, object]) -> list[dict[str, objec
                 "recommendation_confidence": recommendation["confidence"] if recommendation else "",
                 "recommended_buy_price": recommendation["recommended_buy_price"] if recommendation else "",
                 "recommended_sell_price": recommendation["recommended_sell_price"] if recommendation else "",
+                "recommended_buy_unit_price": recommendation["recommended_buy_unit_price"] if recommendation else "",
+                "recommended_sell_unit_price": recommendation["recommended_sell_unit_price"] if recommendation else "",
+                "recommended_sell_price_source": recommendation["recommended_sell_price_source"] if recommendation else "",
+                "vendor_sell_unit_price": recommendation["vendor_sell_unit_price"] if recommendation else "",
+                "auction_deposit_unit_price": recommendation["auction_deposit_unit_price"] if recommendation else "",
+                "estimated_profit_unit_price": recommendation["estimated_profit_unit_price"] if recommendation else "",
                 "best_buy_time": recommendation["best_buy_time"] if recommendation else "",
                 "best_sell_time": recommendation["best_sell_time"] if recommendation else "",
                 "historical_buy_price": recommendation["historical_buy_price"] if recommendation else "",
@@ -563,6 +651,12 @@ def _recommendation_rows_for_export(recommendations: list[Recommendation]) -> li
             "latest_median_unit_price": item.latest_median_unit_price,
             "recommended_buy_price": item.recommended_buy_price,
             "recommended_sell_price": item.recommended_sell_price,
+            "recommended_buy_unit_price": item.recommended_buy_price,
+            "recommended_sell_unit_price": item.recommended_sell_price,
+            "recommended_sell_price_source": item.recommended_sell_price_source,
+            "vendor_sell_unit_price": item.vendor_sell_unit_price,
+            "auction_deposit_unit_price": item.auction_deposit_unit_price,
+            "estimated_profit_unit_price": item.estimated_profit_unit_price,
             "average_first_quartile_unit_price": item.average_first_quartile_unit_price,
             "average_median_unit_price": item.average_median_unit_price,
             "average_third_quartile_unit_price": item.average_third_quartile_unit_price,
@@ -570,6 +664,7 @@ def _recommendation_rows_for_export(recommendations: list[Recommendation]) -> li
             "estimated_demand_score": item.estimated_demand_score,
             "average_sell_through_ratio": item.average_sell_through_ratio,
             "average_sell_through_confidence": item.average_sell_through_confidence,
+            "average_probable_sold_unit_price": item.average_probable_sold_unit_price,
             "player_post_count": item.player_post_count,
             "player_sold_count": item.player_sold_count,
             "player_expired_count": item.player_expired_count,

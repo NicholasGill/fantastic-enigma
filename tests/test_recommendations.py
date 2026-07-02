@@ -4,6 +4,7 @@ from pathlib import Path
 from wow_auction_tracker.auction import AuctionListing, calculate_item_history_metrics, summarize_listings
 from wow_auction_tracker.config import Market, TrackerConfig
 from wow_auction_tracker.features.lifecycle import build_listing_observations
+from wow_auction_tracker.features.metadata import ItemMetadata
 from wow_auction_tracker.features.recommendations import RecommendationEngine
 from wow_auction_tracker.features.sellthrough import build_sell_through_metrics
 from wow_auction_tracker.storage import AuctionRepository, create_db_engine, init_db
@@ -46,8 +47,9 @@ def test_recommendations_score_discounted_item_with_quantity_drop(tmp_path: Path
     assert recommendations[0].score >= 35
     assert recommendations[0].action in {"buy", "watch"}
     assert recommendations[0].estimated_demand_score > 0
-    assert recommendations[0].recommended_buy_price == 5000
-    assert recommendations[0].recommended_sell_price == 8333
+    assert recommendations[0].recommended_buy_price is None
+    assert recommendations[0].recommended_sell_price is None
+    assert recommendations[0].recommended_sell_price_source is None
     assert recommendations[0].average_first_quartile_unit_price == 8333
     assert recommendations[0].average_weighted_unit_price is not None
     assert any("below recent median" in reason for reason in recommendations[0].reasons)
@@ -114,8 +116,8 @@ def test_recommendations_fall_back_to_summaries_while_metrics_warm_up(tmp_path: 
     recommendations = RecommendationEngine(f"sqlite:///{db_path}", min_snapshots=3).recommend()
 
     assert recommendations[0].score > 0
-    assert recommendations[0].recommended_buy_price is not None
-    assert recommendations[0].recommended_sell_price is not None
+    assert recommendations[0].recommended_buy_price is None
+    assert recommendations[0].recommended_sell_price is None
     assert recommendations[0].reasons != ["needs at least 3 snapshots"]
 
 
@@ -161,6 +163,194 @@ def test_recommendations_use_inferred_sell_through(tmp_path: Path) -> None:
     assert recommendation.estimated_demand_score > 0
     assert recommendation.average_sell_through_ratio > 0
     assert any("inferred sell-through" in reason for reason in recommendation.reasons)
+
+
+def test_recommendations_prefer_probable_sold_prices_for_sell_target(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+
+    previous_snapshots = []
+    runs = [
+        [
+            AuctionListing(1, 210930, Market.COMMODITY, 3, 12000, None, None, "LONG", {"id": 1, "item": {"id": 210930}}),
+            AuctionListing(2, 210930, Market.COMMODITY, 5, 8000, None, None, "LONG", {"id": 2, "item": {"id": 210930}}),
+        ],
+        [
+            AuctionListing(2, 210930, Market.COMMODITY, 5, 8000, None, None, "LONG", {"id": 2, "item": {"id": 210930}}),
+        ],
+        [
+            AuctionListing(2, 210930, Market.COMMODITY, 5, 9000, None, None, "LONG", {"id": 2, "item": {"id": 210930}}),
+        ],
+    ]
+    for listings in runs:
+        run_id = repository.start_fetch_run(config)
+        observations = build_listing_observations(
+            listings,
+            previous_snapshots,
+            elapsed_seconds=60,
+        )
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+            observations,
+            build_sell_through_metrics(observations),
+        )
+        previous_snapshots = repository.list_listing_snapshots(run_id)
+
+    recommendation = RecommendationEngine(f"sqlite:///{db_path}", lookback_runs=3).recommend()[0]
+
+    assert recommendation.average_probable_sold_unit_price == 12000
+    assert recommendation.recommended_sell_price == 12000
+    assert recommendation.recommended_sell_price_source == "probable_sold"
+
+
+def test_recommendations_use_quantity_drop_prices_for_sell_target(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+
+    previous_snapshots = []
+    for quantity in (10, 6, 6):
+        run_id = repository.start_fetch_run(config)
+        listings = [
+            AuctionListing(1, 210930, Market.COMMODITY, quantity, 7500, None, None, "LONG", {"id": 1, "item": {"id": 210930}})
+        ]
+        observations = build_listing_observations(listings, previous_snapshots, elapsed_seconds=60)
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+            observations,
+            build_sell_through_metrics(observations),
+        )
+        previous_snapshots = repository.list_listing_snapshots(run_id)
+
+    recommendation = RecommendationEngine(f"sqlite:///{db_path}", lookback_runs=3).recommend()[0]
+
+    assert recommendation.average_probable_sold_unit_price == 7500
+    assert recommendation.recommended_sell_price == 7500
+    assert recommendation.recommended_sell_price_source == "probable_sold"
+
+
+def test_recommendations_keep_recent_sell_target_when_latest_runs_have_no_sales(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+
+    previous_snapshots = []
+    runs = [
+        [
+            AuctionListing(1, 210930, Market.COMMODITY, 4, 11000, None, None, "LONG", {"id": 1, "item": {"id": 210930}}),
+            AuctionListing(2, 210930, Market.COMMODITY, 6, 9000, None, None, "LONG", {"id": 2, "item": {"id": 210930}}),
+        ],
+        [
+            AuctionListing(2, 210930, Market.COMMODITY, 6, 9000, None, None, "LONG", {"id": 2, "item": {"id": 210930}}),
+        ],
+    ]
+    runs.extend(
+        [
+            AuctionListing(2, 210930, Market.COMMODITY, 6, 9000, None, None, "LONG", {"id": 2, "item": {"id": 210930}})
+        ]
+        for _ in range(60)
+    )
+    for listings in runs:
+        run_id = repository.start_fetch_run(config)
+        observations = build_listing_observations(listings, previous_snapshots, elapsed_seconds=60)
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+            observations,
+            build_sell_through_metrics(observations),
+        )
+        previous_snapshots = repository.list_listing_snapshots(run_id)
+
+    recommendation = RecommendationEngine(f"sqlite:///{db_path}", lookback_runs=3).recommend()[0]
+
+    assert recommendation.average_probable_sold_unit_price == 11000
+    assert recommendation.recommended_sell_price == 11000
+    assert recommendation.recommended_sell_price_source == "probable_sold"
+
+
+def test_recommendations_subtract_deposit_from_buy_target_and_profit(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    repository.upsert_item_metadata(
+        [
+            ItemMetadata(
+                item_id=210930,
+                name="Bismuth",
+                quality="COMMON",
+                item_class="Tradeskill",
+                item_subclass="Metal & Stone",
+                inventory_type="NON_EQUIP",
+                item_level=70,
+                required_level=1,
+                purchase_price=2500,
+                sell_price=1000,
+                max_count=0,
+                is_equippable=False,
+                is_stackable=True,
+                icon_url=None,
+            )
+        ]
+    )
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+
+    previous_snapshots = []
+    runs = [
+        [
+            AuctionListing(1, 210930, Market.COMMODITY, 4, 10000, None, None, "LONG", {"id": 1, "item": {"id": 210930}}),
+            AuctionListing(2, 210930, Market.COMMODITY, 6, 7000, None, None, "LONG", {"id": 2, "item": {"id": 210930}}),
+        ],
+        [
+            AuctionListing(2, 210930, Market.COMMODITY, 6, 7000, None, None, "LONG", {"id": 2, "item": {"id": 210930}}),
+        ],
+        [
+            AuctionListing(2, 210930, Market.COMMODITY, 6, 7000, None, None, "LONG", {"id": 2, "item": {"id": 210930}}),
+        ],
+    ]
+    for listings in runs:
+        run_id = repository.start_fetch_run(config)
+        observations = build_listing_observations(listings, previous_snapshots, elapsed_seconds=60)
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+            observations,
+            build_sell_through_metrics(observations),
+        )
+        previous_snapshots = repository.list_listing_snapshots(run_id)
+
+    recommendation = RecommendationEngine(f"sqlite:///{db_path}", lookback_runs=3).recommend()[0]
+
+    assert recommendation.vendor_sell_unit_price == 1000
+    assert recommendation.auction_deposit_unit_price == 600
+    assert recommendation.recommended_sell_price == 10000
+    assert recommendation.recommended_buy_price == 7000
+    assert recommendation.estimated_profit_unit_price == 2400
 
 
 def test_recommendations_prefer_player_sale_outcomes(tmp_path: Path) -> None:

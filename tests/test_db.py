@@ -5,10 +5,12 @@ from wow_auction_tracker.auction import calculate_item_history_metrics, filter_a
 from wow_auction_tracker.config import Market, TrackerConfig
 from wow_auction_tracker.features.lifecycle import build_listing_observations
 from wow_auction_tracker.features.metadata import ItemMetadata
+from wow_auction_tracker.features.opportunities import BuyOpportunityObservation
 from wow_auction_tracker.features.sellthrough import build_sell_through_metrics
 from wow_auction_tracker.storage import (
     AuctionListingRecord,
     AuctionRepository,
+    BuyOpportunityObservationRecord,
     FetchRun,
     ItemHistoryMetricRecord,
     ItemMetadataRecord,
@@ -151,7 +153,7 @@ def test_repository_stores_listing_observations() -> None:
     )
     run_id = repository.start_fetch_run(config)
     listings = filter_auctions(
-        {"auctions": [{"id": 1, "item": {"id": 210930}, "quantity": 2, "unit_price": 100}]},
+        {"auctions": [{"id": 1, "item": {"id": 210930}, "quantity": 2, "unit_price": 100, "time_left": "LONG"}]},
         {210930},
         Market.COMMODITY,
     )
@@ -169,6 +171,7 @@ def test_repository_stores_listing_observations() -> None:
 
     assert len(observations) == 1
     assert observations[0].status == "new"
+    assert observations[0].inferred_outcome is None
 
 
 def test_repository_stores_sell_through_metrics() -> None:
@@ -180,7 +183,7 @@ def test_repository_stores_sell_through_metrics() -> None:
     )
     first_run_id = repository.start_fetch_run(config)
     first_listings = filter_auctions(
-        {"auctions": [{"id": 1, "item": {"id": 210930}, "quantity": 2, "unit_price": 100}]},
+        {"auctions": [{"id": 1, "item": {"id": 210930}, "quantity": 2, "unit_price": 100, "time_left": "LONG"}]},
         {210930},
         Market.COMMODITY,
     )
@@ -192,7 +195,11 @@ def test_repository_stores_sell_through_metrics() -> None:
         build_listing_observations(first_listings, []),
     )
     second_run_id = repository.start_fetch_run(config)
-    observations = build_listing_observations([], repository.list_listing_snapshots(first_run_id))
+    observations = build_listing_observations(
+        [],
+        repository.list_listing_snapshots(first_run_id),
+        elapsed_seconds=60,
+    )
 
     repository.complete_fetch_run(
         second_run_id,
@@ -207,8 +214,56 @@ def test_repository_stores_sell_through_metrics() -> None:
         metrics = session.scalars(select(SellThroughMetricRecord)).all()
 
     assert len(metrics) == 1
+    assert metrics[0].probable_sold_listing_count == 1
+    assert metrics[0].probable_sold_quantity == 2
+    assert metrics[0].probable_sold_average_unit_price == 100
     assert metrics[0].disappeared_quantity == 2
     assert metrics[0].sell_through_ratio_bps == 10000
+
+
+def test_repository_stores_buy_opportunity_observations() -> None:
+    engine = create_db_engine("sqlite:///:memory:")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+    run_id = repository.start_fetch_run(config)
+
+    repository.complete_fetch_run(
+        run_id,
+        [],
+        [],
+        (),
+        (),
+        (),
+        [
+            BuyOpportunityObservation(
+                item_id=210930,
+                market="commodity",
+                auction_id=42,
+                unit_price=7900,
+                quantity=5,
+                buy_target_unit_price=8000,
+                sell_target_unit_price=10000,
+                potential_profit=10500,
+                available_quantity_at_or_below_buy_target=8,
+                recommendation_score=50,
+                recommendation_confidence=75,
+                listing_status="new",
+            )
+        ],
+    )
+
+    with Session(engine) as session:
+        opportunities = session.scalars(select(BuyOpportunityObservationRecord)).all()
+
+    assert len(opportunities) == 1
+    assert opportunities[0].auction_id == 42
+    assert opportunities[0].observed_at is not None
+    assert opportunities[0].unit_price == 7900
+    assert opportunities[0].buy_target_unit_price == 8000
+    assert opportunities[0].potential_profit == 10500
 
 
 def test_repository_blocks_overlapping_fetch_runs_and_records_interval() -> None:

@@ -6,7 +6,13 @@ from sqlalchemy.orm import Session
 
 from wow_auction_tracker.config import TrackerConfig
 from wow_auction_tracker.features.snapshots import fetch_and_store
-from wow_auction_tracker.storage import AuctionRepository, FetchRun, create_db_engine, init_db
+from wow_auction_tracker.storage import (
+    AuctionRepository,
+    BuyOpportunityObservationRecord,
+    FetchRun,
+    create_db_engine,
+    init_db,
+)
 
 
 class FakeClient:
@@ -82,3 +88,51 @@ def test_fetch_and_store_marks_failed_runs() -> None:
 
     assert len(runs) == 1
     assert runs[0].status == "failed"
+
+
+def test_fetch_and_store_tracks_new_auctions_below_prior_buy_price(tmp_path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 124105, "name": "Starlight Rose", "market": "commodity"}]}
+    )
+
+    for quantity in (10, 5, 5):
+        fetch_and_store(
+            config,
+            FakeClient(
+                commodity_payload={
+                    "auctions": [
+                        {"id": 1, "item": {"id": 124105}, "quantity": quantity, "unit_price": 10000}
+                    ]
+                }
+            ),
+            repository,
+        )  # type: ignore[arg-type]
+
+    fetch_and_store(
+        config,
+        FakeClient(
+            commodity_payload={
+                "auctions": [
+                    {"id": 4, "item": {"id": 124105}, "quantity": 3, "unit_price": 7900},
+                    {"id": 5, "item": {"id": 124105}, "quantity": 2, "unit_price": 8000},
+                    {"id": 6, "item": {"id": 124105}, "quantity": 4, "unit_price": 9000},
+                ]
+            }
+        ),
+        repository,
+    )  # type: ignore[arg-type]
+
+    with Session(engine) as session:
+        opportunities = session.scalars(select(BuyOpportunityObservationRecord)).all()
+
+    assert len(opportunities) == 1
+    assert opportunities[0].auction_id == 4
+    assert opportunities[0].unit_price == 7900
+    assert opportunities[0].buy_target_unit_price == 8000
+    assert opportunities[0].sell_target_unit_price == 10000
+    assert opportunities[0].available_quantity_at_or_below_buy_target == 5
+    assert opportunities[0].potential_profit == 6300

@@ -161,11 +161,11 @@ snapshots into useful pricing and demand signals for tracked items.
     score, and reasons.
 
 - [ ] Track buy-opportunity appearances.
-  - Record each snapshot where an item's current minimum listing price is below
-    the recommended buy price.
-  - Store item ID, fetch run ID, observed time, minimum price, buy target, sell
-    target, potential profit, available quantity at or below buy target, and
-    recommendation score.
+  - [x] Record new or newly discounted auction listings below the prior
+    recommended buy price.
+  - [x] Store item ID, fetch run ID, auction ID, observed unit price, quantity,
+    buy target, sell target, potential profit, available quantity at or below
+    buy target, recommendation score, confidence, and listing status.
   - Track when an opportunity first appears, remains available, disappears, and
     reappears.
   - Report opportunity duration and estimated missed/available profit over time.

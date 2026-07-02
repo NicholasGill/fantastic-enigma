@@ -35,11 +35,14 @@ class ListingObservation:
     previous_bid: int | None
     time_left: str | None
     previous_time_left: str | None
+    inferred_outcome: str | None = None
 
 
 def build_listing_observations(
     current_listings: list[AuctionListing],
     previous_listings: list[ListingSnapshot],
+    *,
+    elapsed_seconds: int | None = None,
 ) -> list[ListingObservation]:
     current_by_key = {
         _listing_key(listing): _snapshot_from_listing(listing)
@@ -55,7 +58,7 @@ def build_listing_observations(
     for key, previous in previous_by_key.items():
         if key in current_by_key:
             continue
-        observations.append(_missing_observation(previous))
+        observations.append(_missing_observation(previous, elapsed_seconds))
 
     return sorted(observations, key=lambda item: (item.market, item.item_id, item.observation_key, item.status))
 
@@ -125,10 +128,11 @@ def _current_observation(current: ListingSnapshot, previous: ListingSnapshot | N
         previous_bid=previous.bid if previous else None,
         time_left=current.time_left,
         previous_time_left=previous.time_left if previous else None,
+        inferred_outcome=_inferred_current_outcome(current, previous),
     )
 
 
-def _missing_observation(previous: ListingSnapshot) -> ListingObservation:
+def _missing_observation(previous: ListingSnapshot, elapsed_seconds: int | None) -> ListingObservation:
     return ListingObservation(
         observation_key=previous.observation_key,
         auction_id=previous.auction_id,
@@ -145,6 +149,7 @@ def _missing_observation(previous: ListingSnapshot) -> ListingObservation:
         previous_bid=previous.bid,
         time_left=None,
         previous_time_left=previous.time_left,
+        inferred_outcome=_inferred_missing_outcome(previous.time_left, elapsed_seconds),
     )
 
 
@@ -156,3 +161,41 @@ def _listing_changed(current: ListingSnapshot, previous: ListingSnapshot) -> boo
         or current.bid != previous.bid
         or current.time_left != previous.time_left
     )
+
+
+def _inferred_current_outcome(current: ListingSnapshot, previous: ListingSnapshot | None) -> str | None:
+    if previous is None:
+        return None
+    if current.quantity < previous.quantity:
+        return "probable_sold"
+    return None
+
+
+def _inferred_missing_outcome(previous_time_left: str | None, elapsed_seconds: int | None) -> str:
+    if previous_time_left is None or elapsed_seconds is None:
+        return "removed_unknown"
+
+    remaining_range = _remaining_time_range_seconds(previous_time_left)
+    if remaining_range is None:
+        return "removed_unknown"
+
+    minimum_remaining, maximum_remaining = remaining_range
+    if elapsed_seconds < minimum_remaining:
+        return "probable_sold"
+    if maximum_remaining is not None and elapsed_seconds >= maximum_remaining:
+        return "probable_expired"
+    return "removed_unknown"
+
+
+def _remaining_time_range_seconds(time_left: str) -> tuple[int, int | None] | None:
+    match time_left.upper():
+        case "SHORT":
+            return (0, 30 * 60)
+        case "MEDIUM":
+            return (30 * 60, 2 * 60 * 60)
+        case "LONG":
+            return (2 * 60 * 60, 12 * 60 * 60)
+        case "VERY_LONG":
+            return (12 * 60 * 60, None)
+        case _:
+            return None
