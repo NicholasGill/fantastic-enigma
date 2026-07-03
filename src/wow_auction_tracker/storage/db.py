@@ -22,6 +22,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, rela
 
 from wow_auction_tracker.auction import AuctionListing, ItemHistoryMetric, ItemSummary
 from wow_auction_tracker.config import Market, TrackerConfig, TrackedItem
+from wow_auction_tracker.features.crafting import CraftOpportunityObservation
 from wow_auction_tracker.features.lifecycle import ListingObservation, ListingSnapshot, listing_key_from_parts
 from wow_auction_tracker.features.metadata import ItemMetadata
 from wow_auction_tracker.features.opportunities import BuyOpportunityObservation
@@ -57,6 +58,9 @@ class FetchRun(Base):
     listing_observations: Mapped[list[ListingObservationRecord]] = relationship(back_populates="fetch_run")
     sell_through_metrics: Mapped[list[SellThroughMetricRecord]] = relationship(back_populates="fetch_run")
     buy_opportunity_observations: Mapped[list[BuyOpportunityObservationRecord]] = relationship(back_populates="fetch_run")
+    craft_opportunity_observations: Mapped[list[CraftOpportunityObservationRecord]] = relationship(
+        back_populates="fetch_run"
+    )
 
 
 class AddonImportRecord(Base):
@@ -227,6 +231,31 @@ class BuyOpportunityObservationRecord(Base):
     fetch_run: Mapped[FetchRun] = relationship(back_populates="buy_opportunity_observations")
 
 
+class CraftOpportunityObservationRecord(Base):
+    __tablename__ = "craft_opportunity_observations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fetch_run_id: Mapped[int] = mapped_column(ForeignKey("fetch_runs.id"), nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    recipe_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    recipe_name: Mapped[str | None] = mapped_column(String(255))
+    output_item_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    output_market: Mapped[str] = mapped_column(String(32), nullable=False)
+    output_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    craft_cost: Mapped[int] = mapped_column(Integer, nullable=False)
+    craft_cost_unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_min_unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    sell_target_unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    auction_deposit_unit_price: Mapped[int] = mapped_column(Integer, nullable=False)
+    ah_savings: Mapped[int] = mapped_column(Integer, nullable=False)
+    expected_profit: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_craft_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    confidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    reasons_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    fetch_run: Mapped[FetchRun] = relationship(back_populates="craft_opportunity_observations")
+
+
 class PlayerAuctionPostRecord(Base):
     __tablename__ = "player_auction_posts"
 
@@ -313,7 +342,7 @@ class AuctionRepository:
             if running_id is not None:
                 raise RuntimeError(f"fetch run {running_id} is already running")
 
-            self._upsert_tracked_items(session, config.items)
+            self._upsert_tracked_items(session, config.all_tracked_items)
             run = FetchRun(
                 started_at=datetime.now(UTC),
                 region=config.region,
@@ -335,6 +364,7 @@ class AuctionRepository:
         listing_observations: Iterable[ListingObservation] = (),
         sell_through_metrics: Iterable[SellThroughMetric] = (),
         buy_opportunity_observations: Iterable[BuyOpportunityObservation] = (),
+        craft_opportunity_observations: Iterable[CraftOpportunityObservation] = (),
     ) -> None:
         with Session(self.engine) as session:
             run = session.get(FetchRun, fetch_run_id)
@@ -451,6 +481,29 @@ class AuctionRepository:
                         recommendation_score=opportunity.recommendation_score,
                         recommendation_confidence=opportunity.recommendation_confidence,
                         listing_status=opportunity.listing_status,
+                    )
+                )
+
+            for opportunity in craft_opportunity_observations:
+                session.add(
+                    CraftOpportunityObservationRecord(
+                        fetch_run_id=fetch_run_id,
+                        observed_at=run.started_at,
+                        recipe_id=opportunity.recipe_id,
+                        recipe_name=opportunity.recipe_name,
+                        output_item_id=opportunity.output_item_id,
+                        output_market=opportunity.output_market,
+                        output_quantity=opportunity.output_quantity,
+                        craft_cost=opportunity.craft_cost,
+                        craft_cost_unit_price=opportunity.craft_cost_unit_price,
+                        output_min_unit_price=opportunity.output_min_unit_price,
+                        sell_target_unit_price=opportunity.sell_target_unit_price,
+                        auction_deposit_unit_price=opportunity.auction_deposit_unit_price,
+                        ah_savings=opportunity.ah_savings,
+                        expected_profit=opportunity.expected_profit,
+                        max_craft_quantity=opportunity.max_craft_quantity,
+                        confidence=opportunity.confidence,
+                        reasons_json=json.dumps(opportunity.reasons),
                     )
                 )
 
@@ -890,6 +943,36 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
             "create index if not exists ix_buy_opportunity_observations_observed_at "
             "on buy_opportunity_observations (observed_at)"
         )
+        connection.exec_driver_sql(
+            """
+            create table if not exists craft_opportunity_observations (
+                id integer primary key,
+                fetch_run_id integer not null,
+                observed_at datetime not null,
+                recipe_id varchar(128) not null,
+                recipe_name varchar(255),
+                output_item_id integer not null,
+                output_market varchar(32) not null,
+                output_quantity integer not null,
+                craft_cost integer not null,
+                craft_cost_unit_price integer not null,
+                output_min_unit_price integer not null,
+                sell_target_unit_price integer not null,
+                auction_deposit_unit_price integer not null,
+                ah_savings integer not null,
+                expected_profit integer not null,
+                max_craft_quantity integer not null,
+                confidence integer not null,
+                reasons_json text not null,
+                foreign key(fetch_run_id) references fetch_runs (id)
+            )
+            """
+        )
+        for column in ("fetch_run_id", "observed_at", "recipe_id", "output_item_id"):
+            connection.exec_driver_sql(
+                f"create index if not exists ix_craft_opportunity_observations_{column} "
+                f"on craft_opportunity_observations ({column})"
+            )
         connection.exec_driver_sql(
             """
             create table if not exists addon_imports (

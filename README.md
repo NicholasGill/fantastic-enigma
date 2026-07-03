@@ -96,6 +96,12 @@ Show current item recommendations from stored snapshot history:
 uv run wow-auctions recommend --limit 10
 ```
 
+Show profitable craft signals from the latest snapshot:
+
+```bash
+uv run wow-auctions report crafts --limit 10
+```
+
 Import companion addon SavedVariables after copying or pointing at the game
 file:
 
@@ -121,6 +127,7 @@ Export stored data to CSV:
 uv run wow-auctions export latest --output latest.csv
 uv run wow-auctions export item --item-id 210930 --output item-history.csv
 uv run wow-auctions export recommendations --limit 10
+uv run wow-auctions export crafts --output craft-signals.csv
 ```
 
 Recommendations are conservative estimates based on current price versus recent
@@ -141,6 +148,12 @@ blank instead of falling back to quartiles or medians.
 Profit estimates subtract the estimated 48-hour auction deposit per unit from
 the sell-minus-buy spread. The deposit estimate uses Blizzard item metadata's
 vendor sell price field and the standard 48-hour deposit rate.
+
+Craft signals are based on manually configured recipes. Recipe ingredient and
+output items are fetched automatically even when they are not duplicated under
+`items`. A craft signal appears only when the latest ingredient cost is below
+the current output auction price and the output has a conservative sell target
+from inferred or personal sale evidence.
 
 ## Companion Addon
 
@@ -216,6 +229,19 @@ items:
   - id: 219947
     name: Storm Dust
     market: commodity
+recipes:
+  - id: refine-bismuth-r2
+    name: Refine Bismuth
+    output:
+      item_id: 210931
+      name: Bismuth
+      market: commodity
+      quantity: 1
+    ingredients:
+      - item_id: 210930
+        name: Bismuth
+        market: commodity
+        quantity: 5
 ```
 
 The example config tracks a starter set of The War Within reagent commodities

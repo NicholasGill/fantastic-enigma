@@ -5,12 +5,14 @@ from wow_auction_tracker.auction import calculate_item_history_metrics, filter_a
 from wow_auction_tracker.config import Market, TrackerConfig
 from wow_auction_tracker.features.lifecycle import build_listing_observations
 from wow_auction_tracker.features.metadata import ItemMetadata
+from wow_auction_tracker.features.crafting import CraftOpportunityObservation
 from wow_auction_tracker.features.opportunities import BuyOpportunityObservation
 from wow_auction_tracker.features.sellthrough import build_sell_through_metrics
 from wow_auction_tracker.storage import (
     AuctionListingRecord,
     AuctionRepository,
     BuyOpportunityObservationRecord,
+    CraftOpportunityObservationRecord,
     FetchRun,
     ItemHistoryMetricRecord,
     ItemMetadataRecord,
@@ -265,6 +267,60 @@ def test_repository_stores_buy_opportunity_observations() -> None:
     assert opportunities[0].unit_price == 7900
     assert opportunities[0].buy_target_unit_price == 8000
     assert opportunities[0].potential_profit == 10500
+
+
+def test_repository_stores_craft_opportunity_observations() -> None:
+    engine = create_db_engine("sqlite:///:memory:")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {
+            "items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}],
+            "recipes": [
+                {
+                    "id": "refine-bismuth",
+                    "output": {"item_id": 210931, "name": "Bismuth", "market": "commodity", "quantity": 1},
+                    "ingredients": [{"item_id": 210930, "name": "Bismuth", "market": "commodity", "quantity": 5}],
+                }
+            ],
+        }
+    )
+
+    run_id = repository.start_fetch_run(config)
+    repository.complete_fetch_run(
+        run_id,
+        [],
+        [],
+        craft_opportunity_observations=[
+            CraftOpportunityObservation(
+                recipe_id="refine-bismuth",
+                recipe_name="Refine Bismuth",
+                output_item_id=210931,
+                output_market="commodity",
+                output_quantity=1,
+                craft_cost=560,
+                craft_cost_unit_price=560,
+                output_min_unit_price=900,
+                sell_target_unit_price=1000,
+                auction_deposit_unit_price=20,
+                ah_savings=340,
+                expected_profit=420,
+                max_craft_quantity=2,
+                confidence=80,
+                reasons=["profitable craft"],
+            )
+        ],
+    )
+
+    with Session(engine) as session:
+        opportunities = session.scalars(select(CraftOpportunityObservationRecord)).all()
+        tracked_items = session.scalars(select(TrackedItemRecord).order_by(TrackedItemRecord.item_id)).all()
+
+    assert [item.item_id for item in tracked_items] == [210930, 210931]
+    assert len(opportunities) == 1
+    assert opportunities[0].recipe_id == "refine-bismuth"
+    assert opportunities[0].expected_profit == 420
+    assert opportunities[0].reasons_json == '["profitable craft"]'
 
 
 def test_repository_blocks_overlapping_fetch_runs_and_records_interval() -> None:

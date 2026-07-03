@@ -106,6 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     report_item_parser = report_subparsers.add_parser("item", help="Show snapshot history for one item.")
     report_item_parser.add_argument("--item-id", type=_positive_int, required=True, help="Item ID to show.")
+    report_crafts_parser = report_subparsers.add_parser("crafts", help="Show current profitable craft signals.")
+    report_crafts_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=10,
+        help="Number of craft signals to show. Defaults to 10.",
+    )
     export_parser = subparsers.add_parser("export", help="Export stored data to CSV.")
     export_subparsers = export_parser.add_subparsers(dest="export_command", required=True)
     export_latest_parser = export_subparsers.add_parser("latest", help="Export the latest item summaries to CSV.")
@@ -143,6 +150,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone",
         default="America/New_York",
         help="Timezone for historical timing labels. Defaults to America/New_York.",
+    )
+    export_crafts_parser = export_subparsers.add_parser("crafts", help="Export current craft signals to CSV.")
+    export_crafts_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Write CSV to a file instead of stdout.",
     )
     import_parser = subparsers.add_parser("import-addon", help="Import companion addon SavedVariables.")
     import_parser.add_argument(
@@ -223,6 +237,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.report_command == "item":
             _print_item_report(store.item_history(args.item_id))
             return 0
+        if args.report_command == "crafts":
+            _print_craft_report(store.overview(), args.limit)
+            return 0
         raise ValueError(f"unsupported report command {args.report_command}")
 
     if args.command == "export":
@@ -250,6 +267,13 @@ def main(argv: list[str] | None = None) -> int:
                 _recommendation_rows_for_export(recommendations),
                 args.output,
                 fieldnames=_RECOMMENDATION_EXPORT_FIELDNAMES,
+            )
+            return 0
+        if args.export_command == "crafts":
+            _write_csv(
+                _craft_rows_for_export(store.overview()),
+                args.output,
+                fieldnames=_CRAFT_EXPORT_FIELDNAMES,
             )
             return 0
         raise ValueError(f"unsupported export command {args.export_command}")
@@ -453,6 +477,28 @@ def _print_item_report(item_history: dict[str, object]) -> None:
         )
 
 
+def _print_craft_report(overview: dict[str, object], limit: int) -> None:
+    rows = overview.get("craft_opportunities", [])
+    if not isinstance(rows, list) or not rows:
+        print("No craft signals available")
+        return
+
+    print("Recipe              Output               Craft/Unit  AH/Unit   Sell/Unit  Profit    Max  Confidence")
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        print(
+            f"{str(row.get('recipe_name') or row.get('recipe_id'))[:18]:<18} "
+            f"{str(row.get('output_name'))[:20]:<20} "
+            f"{_format_copper(row.get('craft_cost_unit_price')):>10} "
+            f"{_format_copper(row.get('output_min_unit_price')):>8}  "
+            f"{_format_copper(row.get('sell_target_unit_price')):>9} "
+            f"{_format_copper(row.get('expected_profit')):>8}  "
+            f"{int(row.get('max_craft_quantity') or 0):>3}  "
+            f"{int(row.get('confidence') or 0):>10}"
+        )
+
+
 _LATEST_EXPORT_FIELDNAMES = [
     "item_id",
     "name",
@@ -545,6 +591,24 @@ _RECOMMENDATION_EXPORT_FIELDNAMES = [
     "historical_buy_price",
     "historical_sell_price",
     "historical_timing_confidence",
+    "reasons",
+]
+_CRAFT_EXPORT_FIELDNAMES = [
+    "recipe_id",
+    "recipe_name",
+    "output_item_id",
+    "output_name",
+    "output_market",
+    "output_quantity",
+    "craft_cost",
+    "craft_cost_unit_price",
+    "output_min_unit_price",
+    "sell_target_unit_price",
+    "auction_deposit_unit_price",
+    "ah_savings",
+    "expected_profit",
+    "max_craft_quantity",
+    "confidence",
     "reasons",
 ]
 
@@ -700,6 +764,39 @@ def _recommendation_rows_for_export(recommendations: list[Recommendation]) -> li
         }
         for item in recommendations
     ]
+
+
+def _craft_rows_for_export(overview: dict[str, object]) -> list[dict[str, object]]:
+    rows = overview.get("craft_opportunities", [])
+    if not isinstance(rows, list):
+        return []
+
+    export_rows: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        reasons = row.get("reasons")
+        export_rows.append(
+            {
+                "recipe_id": row.get("recipe_id"),
+                "recipe_name": row.get("recipe_name"),
+                "output_item_id": row.get("output_item_id"),
+                "output_name": row.get("output_name"),
+                "output_market": row.get("output_market"),
+                "output_quantity": row.get("output_quantity"),
+                "craft_cost": row.get("craft_cost"),
+                "craft_cost_unit_price": row.get("craft_cost_unit_price"),
+                "output_min_unit_price": row.get("output_min_unit_price"),
+                "sell_target_unit_price": row.get("sell_target_unit_price"),
+                "auction_deposit_unit_price": row.get("auction_deposit_unit_price"),
+                "ah_savings": row.get("ah_savings"),
+                "expected_profit": row.get("expected_profit"),
+                "max_craft_quantity": row.get("max_craft_quantity"),
+                "confidence": row.get("confidence"),
+                "reasons": "; ".join(str(reason) for reason in reasons) if isinstance(reasons, list) else "",
+            }
+        )
+    return export_rows
 
 
 def _recommendation_for_item(overview: dict[str, object], item_id: int) -> dict[str, object] | None:

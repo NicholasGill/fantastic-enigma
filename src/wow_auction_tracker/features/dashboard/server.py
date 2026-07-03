@@ -125,6 +125,7 @@ class DashboardDataStore:
                 "items": items,
                 "latest_lifecycle": self._latest_lifecycle(connection, latest_run["id"] if latest_run else None),
                 "recommendations": recommendations,
+                "craft_opportunities": self._craft_opportunities(connection, latest_run["id"] if latest_run else None),
                 "player_activity": self._player_activity(connection),
                 "dev_mode": dev_mode,
             }
@@ -222,6 +223,7 @@ class DashboardDataStore:
             "listing_observations",
             "sell_through_metrics",
             "buy_opportunity_observations",
+            "craft_opportunity_observations",
             "addon_imports",
             "player_auction_posts",
             "player_auction_outcomes",
@@ -336,6 +338,57 @@ class DashboardDataStore:
                 int(item["item_id"]),
             ) or _crafting_quality_from_item_rank(connection, int(item["item_id"]))
         return items
+
+    @staticmethod
+    def _craft_opportunities(
+        connection: sqlite3.Connection,
+        latest_run_id: int | None,
+    ) -> list[dict[str, Any]]:
+        if latest_run_id is None:
+            return []
+
+        rows = connection.execute(
+            """
+            select
+                c.id,
+                c.observed_at,
+                c.recipe_id,
+                c.recipe_name,
+                c.output_item_id,
+                coalesce(m.name, t.name, 'Item ' || c.output_item_id) as output_name,
+                c.output_market,
+                c.output_quantity,
+                c.craft_cost,
+                c.craft_cost_unit_price,
+                c.output_min_unit_price,
+                c.sell_target_unit_price,
+                c.auction_deposit_unit_price,
+                c.ah_savings,
+                c.expected_profit,
+                c.max_craft_quantity,
+                c.confidence,
+                c.reasons_json
+            from craft_opportunity_observations c
+            left join item_metadata m on m.item_id = c.output_item_id
+            left join tracked_items t on t.item_id = c.output_item_id
+            where c.fetch_run_id = ?
+            order by c.expected_profit desc, c.ah_savings desc, c.recipe_id
+            limit 20
+            """,
+            (latest_run_id,),
+        ).fetchall()
+
+        opportunities: list[dict[str, Any]] = []
+        for row in rows:
+            opportunity = dict(row)
+            reasons_json = str(opportunity.pop("reasons_json") or "[]")
+            try:
+                reasons = json.loads(reasons_json)
+            except json.JSONDecodeError:
+                reasons = []
+            opportunity["reasons"] = reasons if isinstance(reasons, list) else []
+            opportunities.append(opportunity)
+        return opportunities
 
     @staticmethod
     def _player_activity(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -485,6 +538,7 @@ def create_dashboard_app(config: DashboardConfig) -> Flask:
     @app.get("/")
     @app.get("/my-auctions")
     @app.get("/market")
+    @app.get("/stats")
     def _index() -> Response:
         return Response(DASHBOARD_HTML, mimetype="text/html")
 
@@ -846,9 +900,14 @@ DASHBOARD_HTML = """<!doctype html>
       cursor: pointer;
     }
     button:hover { border-color: var(--accent); }
-    main {
-      padding: 18px 24px 28px;
+    .top-tabs {
+      position: sticky;
+      top: 73px;
+      z-index: 4;
+      padding: 10px 24px 0;
+      background: var(--bg);
     }
+    main { padding: 18px 24px 28px; }
     .tab-list {
       display: flex;
       gap: 8px;
@@ -1205,6 +1264,7 @@ DASHBOARD_HTML = """<!doctype html>
       .player-grid section:first-child { grid-column: auto; }
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       header { padding: 14px; align-items: flex-start; flex-direction: column; }
+      .top-tabs { top: 132px; padding: 10px 14px 0; }
       .toolbar { width: 100%; }
       input { flex: 1; min-width: 0; }
     }
@@ -1230,23 +1290,14 @@ DASHBOARD_HTML = """<!doctype html>
       <button id="refresh" type="button">Refresh</button>
     </div>
   </header>
-  <main>
-    <div class="grid">
-      <div class="metric"><span>Database</span><strong id="db-size">-</strong></div>
-      <div class="metric"><span>Fetch Runs</span><strong id="fetch-runs">-</strong></div>
-      <div class="metric"><span>Listings</span><strong id="listings">-</strong></div>
-      <div class="metric"><span>Latest Run</span><strong id="latest-run">-</strong></div>
-      <div class="metric"><span>New Listings</span><strong id="new-listings">-</strong></div>
-      <div class="metric"><span>Missing Listings</span><strong id="missing-listings">-</strong></div>
-      <div class="metric"><span>My Listings</span><strong id="my-listings">-</strong></div>
-      <div class="metric"><span>My Buys</span><strong id="my-buys">-</strong></div>
-      <div class="metric"><span>Buy Signals</span><strong id="buy-signals">-</strong></div>
-    </div>
-
+  <nav class="top-tabs">
     <div class="tab-list" role="tablist" aria-label="Dashboard views">
       <button class="tab-button active" id="market-tab" type="button" role="tab" aria-selected="true" aria-controls="market-panel" data-tab="market">Market</button>
+      <button class="tab-button" id="stats-tab" type="button" role="tab" aria-selected="false" aria-controls="stats-panel" data-tab="stats">Fetch Stats</button>
       <button class="tab-button" id="player-tab" type="button" role="tab" aria-selected="false" aria-controls="player-panel" data-tab="player">My Auctions</button>
     </div>
+  </nav>
+  <main>
 
     <div class="tab-panel active" id="market-panel" role="tabpanel" aria-labelledby="market-tab" data-panel="market">
       <div class="market-layout">
@@ -1293,11 +1344,44 @@ DASHBOARD_HTML = """<!doctype html>
             <div class="recommendations" id="recommendations"></div>
           </section>
           <section>
-            <div class="section-head"><h2>Recent Runs</h2></div>
-            <div class="runs" id="runs"></div>
+            <div class="section-head"><h2>Craft Signals</h2></div>
+            <div class="mini-table-wrap">
+              <table class="mini-table">
+                <thead>
+                  <tr>
+                    <th>Output</th>
+                    <th>Craft</th>
+                    <th>AH</th>
+                    <th>Sell</th>
+                    <th>Profit</th>
+                    <th>Max</th>
+                  </tr>
+                </thead>
+                <tbody id="craft-signals-table"></tbody>
+              </table>
+            </div>
           </section>
         </div>
       </div>
+    </div>
+
+    <div class="tab-panel" id="stats-panel" role="tabpanel" aria-labelledby="stats-tab" data-panel="stats">
+      <div class="grid">
+        <div class="metric"><span>Database</span><strong id="db-size">-</strong></div>
+        <div class="metric"><span>Fetch Runs</span><strong id="fetch-runs">-</strong></div>
+        <div class="metric"><span>Listings</span><strong id="listings">-</strong></div>
+        <div class="metric"><span>Latest Run</span><strong id="latest-run">-</strong></div>
+        <div class="metric"><span>New Listings</span><strong id="new-listings">-</strong></div>
+        <div class="metric"><span>Missing Listings</span><strong id="missing-listings">-</strong></div>
+        <div class="metric"><span>My Listings</span><strong id="my-listings">-</strong></div>
+        <div class="metric"><span>My Buys</span><strong id="my-buys">-</strong></div>
+        <div class="metric"><span>Buy Signals</span><strong id="buy-signals">-</strong></div>
+        <div class="metric"><span>Craft Signals</span><strong id="craft-signals">-</strong></div>
+      </div>
+      <section>
+        <div class="section-head"><h2>Recent Runs</h2></div>
+        <div class="runs" id="runs"></div>
+      </section>
     </div>
 
     <div class="tab-panel" id="player-panel" role="tabpanel" aria-labelledby="player-tab" data-panel="player">
@@ -1394,9 +1478,11 @@ DASHBOARD_HTML = """<!doctype html>
       myListings: document.getElementById('my-listings'),
       myBuys: document.getElementById('my-buys'),
       buySignals: document.getElementById('buy-signals'),
+      craftSignals: document.getElementById('craft-signals'),
       latestTime: document.getElementById('latest-time'),
       items: document.getElementById('items'),
       recommendations: document.getElementById('recommendations'),
+      craftSignalsTable: document.getElementById('craft-signals-table'),
       myListingsNote: document.getElementById('my-listings-note'),
       myListingsTable: document.getElementById('my-listings-table'),
       myBuysTable: document.getElementById('my-buys-table'),
@@ -1543,10 +1629,12 @@ DASHBOARD_HTML = """<!doctype html>
       els.myListings.textContent = integer(overview.player_activity?.summary?.listing_count);
       els.myBuys.textContent = integer(overview.player_activity?.summary?.purchase_count);
       els.buySignals.textContent = integer(overview.player_activity?.summary?.buy_opportunity_count);
+      els.craftSignals.textContent = integer(overview.craft_opportunities?.length);
       els.latestTime.textContent = overview.latest_run ? shortTime(overview.latest_run.finished_at) : '-';
       document.body.classList.toggle('dev-mode-active', Boolean(overview.dev_mode));
       renderItems();
       renderRecommendations();
+      renderCraftSignals();
       renderPlayerActivity();
       renderRuns();
     }
@@ -1627,6 +1715,21 @@ DASHBOARD_HTML = """<!doctype html>
       });
     }
 
+    function renderCraftSignals() {
+      const rows = overview.craft_opportunities || [];
+      els.craftSignalsTable.innerHTML = rows.length ? rows.map((row) => {
+        const gain = profit(row.expected_profit);
+        return `<tr>
+          <td>${itemName(row.output_name)}<br><span class="muted">${row.recipe_name || row.recipe_id}</span></td>
+          <td>${gold(row.craft_cost_unit_price)}</td>
+          <td>${gold(row.output_min_unit_price)}</td>
+          <td>${gold(row.sell_target_unit_price)}</td>
+          <td class="${gain.cls}">${gain.text}</td>
+          <td>${integer(row.max_craft_quantity)}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="6" class="muted">No profitable craft signals yet.</td></tr>';
+    }
+
     function renderPlayerActivity() {
       const activity = overview.player_activity || {};
       const latestImport = activity.latest_import;
@@ -1692,10 +1795,12 @@ DASHBOARD_HTML = """<!doctype html>
 
     function tabFromPath() {
       if (window.location.pathname === '/my-auctions') return 'player';
+      if (window.location.pathname === '/stats') return 'stats';
       return 'market';
     }
 
     function pathForTab(tabName) {
+      if (tabName === 'stats') return '/stats';
       return tabName === 'player' ? '/my-auctions' : '/market';
     }
 

@@ -10,6 +10,7 @@ from wow_auction_tracker.auction import (
 )
 from wow_auction_tracker.clients.blizzard import BlizzardClient
 from wow_auction_tracker.config import Market, TrackerConfig
+from wow_auction_tracker.features.crafting import build_craft_opportunity_observations
 from wow_auction_tracker.features.lifecycle import build_listing_observations
 from wow_auction_tracker.features.metadata import ItemMetadata, parse_item_metadata
 from wow_auction_tracker.features.opportunities import build_buy_opportunity_observations
@@ -69,6 +70,11 @@ def fetch_and_store(
             listing_observations,
             recommendations,
         )
+        craft_opportunity_observations = build_craft_opportunity_observations(
+            config.recipes,
+            listings,
+            recommendations,
+        )
         repository.complete_fetch_run(
             fetch_run_id,
             listings,
@@ -77,6 +83,7 @@ def fetch_and_store(
             listing_observations,
             sell_through_metrics,
             buy_opportunity_observations,
+            craft_opportunity_observations,
         )
         return FetchResult(
             fetch_run_id=fetch_run_id,
@@ -93,7 +100,7 @@ def _fetch_missing_item_metadata(
     client: BlizzardClient,
     repository: AuctionRepository,
 ) -> list[ItemMetadata]:
-    missing_item_ids = repository.missing_metadata_item_ids(item.id for item in config.items)
+    missing_item_ids = repository.missing_metadata_item_ids(item.id for item in config.all_tracked_items)
     metadata_items: list[ItemMetadata] = []
     for item_id in sorted(missing_item_ids):
         item_payload = client.fetch_item(item_id)

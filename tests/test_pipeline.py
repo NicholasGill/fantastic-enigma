@@ -9,6 +9,7 @@ from wow_auction_tracker.features.snapshots import fetch_and_store
 from wow_auction_tracker.storage import (
     AuctionRepository,
     BuyOpportunityObservationRecord,
+    CraftOpportunityObservationRecord,
     FetchRun,
     create_db_engine,
     init_db,
@@ -136,3 +137,62 @@ def test_fetch_and_store_tracks_new_auctions_below_prior_buy_price(tmp_path) -> 
     assert opportunities[0].sell_target_unit_price == 10000
     assert opportunities[0].available_quantity_at_or_below_buy_target == 5
     assert opportunities[0].potential_profit == 6300
+
+
+def test_fetch_and_store_tracks_profitable_craft_opportunities(tmp_path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {
+            "items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}],
+            "recipes": [
+                {
+                    "id": "refine-bismuth",
+                    "name": "Refine Bismuth",
+                    "output": {"item_id": 210931, "name": "Bismuth", "market": "commodity", "quantity": 1},
+                    "ingredients": [{"item_id": 210930, "name": "Bismuth", "market": "commodity", "quantity": 5}],
+                }
+            ],
+        }
+    )
+
+    for quantity in (10, 5, 5):
+        fetch_and_store(
+            config,
+            FakeClient(
+                commodity_payload={
+                    "auctions": [
+                        {"id": 1, "item": {"id": 210931}, "quantity": quantity, "unit_price": 1000},
+                        {"id": 2, "item": {"id": 210930}, "quantity": 5, "unit_price": 100},
+                    ]
+                }
+            ),
+            repository,
+        )  # type: ignore[arg-type]
+
+    client = FakeClient(
+        commodity_payload={
+            "auctions": [
+                {"id": 3, "item": {"id": 210931}, "quantity": 1, "unit_price": 900},
+                {"id": 4, "item": {"id": 210930}, "quantity": 5, "unit_price": 100},
+            ]
+        }
+    )
+    latest_result = fetch_and_store(config, client, repository)  # type: ignore[arg-type]
+
+    with Session(engine) as session:
+        opportunities = session.scalars(
+            select(CraftOpportunityObservationRecord).where(
+                CraftOpportunityObservationRecord.fetch_run_id == latest_result.fetch_run_id
+            )
+        ).all()
+
+    assert client.fetched_item_ids == []
+    assert len(opportunities) == 1
+    assert opportunities[0].recipe_id == "refine-bismuth"
+    assert opportunities[0].craft_cost_unit_price == 500
+    assert opportunities[0].output_min_unit_price == 900
+    assert opportunities[0].sell_target_unit_price == 1000
+    assert opportunities[0].expected_profit == 500

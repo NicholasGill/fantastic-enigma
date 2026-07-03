@@ -104,3 +104,16 @@ items:
   - id: 212669
     name: Gloom Chitin
     market: commodity
+recipes:
+  - id: refine-bismuth-r2
+    name: Refine Bismuth
+    output:
+      item_id: 210931
+      name: Bismuth
+      market: commodity
+      quantity: 1
+    ingredients:
+      - item_id: 210930
+        name: Bismuth
+        market: commodity
+        quantity: 5

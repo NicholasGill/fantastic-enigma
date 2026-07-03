@@ -3,6 +3,7 @@ from pathlib import Path
 
 from wow_auction_tracker.auction import AuctionListing, summarize_listings
 from wow_auction_tracker.config import Market, TrackerConfig
+from wow_auction_tracker.features.crafting import CraftOpportunityObservation
 from wow_auction_tracker.features.opportunities import BuyOpportunityObservation
 from wow_auction_tracker.features.player import AddonImportResult, PlayerAuctionOutcome, PlayerAuctionPost
 from wow_auction_tracker.features.player import PlayerAuctionPurchase
@@ -95,6 +96,7 @@ def test_dashboard_overview_returns_latest_counts_and_items(tmp_path: Path) -> N
     assert payload["items"][0]["recommended_sell_price"] is None
     assert payload["items"][0]["recommended_sell_price_source"] is None
     assert payload["items"][0]["crafting_quality"] == "1"
+    assert payload["craft_opportunities"] == []
     assert payload["player_activity"]["summary"]["listing_count"] == 0
 
 
@@ -324,6 +326,25 @@ def test_dashboard_overview_returns_player_activity(tmp_path: Path) -> None:
                 listing_status="new",
             )
         ],
+        craft_opportunity_observations=[
+            CraftOpportunityObservation(
+                recipe_id="enchant-dust",
+                recipe_name="Make Storm Dust",
+                output_item_id=219946,
+                output_market="commodity",
+                output_quantity=1,
+                craft_cost=7000,
+                craft_cost_unit_price=7000,
+                output_min_unit_price=10000,
+                sell_target_unit_price=12000,
+                auction_deposit_unit_price=100,
+                ah_savings=3000,
+                expected_profit=4900,
+                max_craft_quantity=3,
+                confidence=75,
+                reasons=["profitable craft"],
+            )
+        ],
     )
     repository.import_addon_data(
         AddonImportResult(
@@ -392,6 +413,9 @@ def test_dashboard_overview_returns_player_activity(tmp_path: Path) -> None:
     assert activity["purchases"][0]["total_price"] == 8000
     assert activity["outcomes"][0]["outcome"] == "sold"
     assert activity["buy_opportunities"][0]["potential_profit"] == 50000
+    assert payload["craft_opportunities"][0]["recipe_id"] == "enchant-dust"
+    assert payload["craft_opportunities"][0]["output_name"] == "Storm Dust"
+    assert payload["craft_opportunities"][0]["reasons"] == ["profitable craft"]
 
 
 def test_dashboard_infers_outcome_item_from_owned_quantity_drop(tmp_path: Path) -> None:
@@ -495,8 +519,14 @@ def test_dashboard_table_headers_have_tooltips() -> None:
     assert "My Listings" in DASHBOARD_HTML
     assert "My Buys" in DASHBOARD_HTML
     assert "Buy Signals" in DASHBOARD_HTML
+    assert "Craft Signals" in DASHBOARD_HTML
+    assert 'id="craft-signals-table"' in DASHBOARD_HTML
     assert "Auction Outcomes" in DASHBOARD_HTML
+    assert '<nav class="top-tabs">' in DASHBOARD_HTML
     assert 'role="tablist"' in DASHBOARD_HTML
+    assert 'data-tab="stats"' in DASHBOARD_HTML
+    assert 'id="stats-panel"' in DASHBOARD_HTML
+    assert "Fetch Stats" in DASHBOARD_HTML
     assert 'data-tab="player"' in DASHBOARD_HTML
     assert 'id="player-panel"' in DASHBOARD_HTML
     assert "setActiveTab" in DASHBOARD_HTML

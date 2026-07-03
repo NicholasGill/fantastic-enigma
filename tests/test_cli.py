@@ -9,6 +9,7 @@ from wow_auction_tracker.cli import build_parser
 from wow_auction_tracker.cli import _database_size_label
 from wow_auction_tracker.cli import _format_file_size
 from wow_auction_tracker.cli import main
+from wow_auction_tracker.features.crafting import CraftOpportunityObservation
 from wow_auction_tracker.features.lifecycle import build_listing_observations
 from wow_auction_tracker.features.metadata import ItemMetadata
 from wow_auction_tracker.storage import AuctionRepository, create_db_engine, init_db
@@ -122,6 +123,19 @@ def test_report_item_command_prints_history_rows(capsys: pytest.CaptureFixture[s
     assert exit_code == 0
     assert "Run ID" in captured
     assert "210930" in captured
+
+
+def test_report_crafts_command_prints_craft_signals(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    _store_craft_signal(db_path)
+
+    exit_code = main(["--database-url", f"sqlite:///{db_path}", "report", "crafts", "--limit", "1"])
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Recipe" in captured
+    assert "Refine Bismuth" in captured
+    assert "Bismuth" in captured
 
 
 def test_export_latest_command_writes_csv(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
@@ -242,6 +256,22 @@ def test_export_recommendations_command_writes_csv_stdout(capsys: pytest.Capture
     assert rows[0]["recommended_sell_price_source"] == ""
 
 
+def test_export_crafts_command_writes_csv_stdout(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    _store_craft_signal(db_path)
+
+    exit_code = main(["--database-url", f"sqlite:///{db_path}", "export", "crafts"])
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    rows = list(csv.DictReader(captured.splitlines()))
+    assert len(rows) == 1
+    assert rows[0]["recipe_id"] == "refine-bismuth"
+    assert rows[0]["output_item_id"] == "210931"
+    assert rows[0]["expected_profit"] == "420"
+    assert rows[0]["reasons"] == "profitable craft"
+
+
 def test_recompute_inference_command_updates_probable_sales(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")
@@ -319,3 +349,55 @@ def test_import_addon_command_stores_saved_variables(capsys: pytest.CaptureFixtu
 
     assert exit_code == 0
     assert "1 owned auction rows, 1 mail rows, 1 purchase rows" in captured
+
+
+def _store_craft_signal(db_path: Path) -> None:
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    repository.upsert_item_metadata(
+        [
+            ItemMetadata(
+                item_id=210931,
+                name="Bismuth",
+                quality="COMMON",
+                item_class="Tradeskill",
+                item_subclass="Metal & Stone",
+                inventory_type="NON_EQUIP",
+                item_level=70,
+                required_level=1,
+                purchase_price=2500,
+                sell_price=500,
+                max_count=0,
+                is_equippable=False,
+                is_stackable=True,
+                icon_url=None,
+            )
+        ]
+    )
+    config = TrackerConfig.model_validate({"items": [{"id": 210931, "name": "Bismuth", "market": "commodity"}]})
+    run_id = repository.start_fetch_run(config)
+    repository.complete_fetch_run(
+        run_id,
+        [],
+        [],
+        craft_opportunity_observations=[
+            CraftOpportunityObservation(
+                recipe_id="refine-bismuth",
+                recipe_name="Refine Bismuth",
+                output_item_id=210931,
+                output_market="commodity",
+                output_quantity=1,
+                craft_cost=560,
+                craft_cost_unit_price=560,
+                output_min_unit_price=900,
+                sell_target_unit_price=1000,
+                auction_deposit_unit_price=20,
+                ah_savings=340,
+                expected_profit=420,
+                max_craft_quantity=2,
+                confidence=80,
+                reasons=["profitable craft"],
+            )
+        ],
+    )
