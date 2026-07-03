@@ -91,44 +91,40 @@ snapshots into useful pricing and demand signals for tracked items.
 
 ## Player Auction Features
 
-- [x] Add minimal WoW companion addon.
-  - Record owned-auction snapshots from the auction house.
-  - Record auction-related mailbox rows for sale/expiry/cancel signals.
-  - Store data in `WowAuctionTrackerDB` SavedVariables.
-
-- [x] Import companion addon SavedVariables.
-  - Parse `WowAuctionTracker.lua`.
-  - Store player auction posts and outcomes in SQLite.
-  - Preserve raw addon rows for classifier improvements.
-
-- [x] Blend player auction outcomes into recommendations.
-  - Track character-specific sale rate, time to sale, expired rate, and net
-    proceeds.
-  - Prefer real player outcomes over inferred market sell-through when enough
-    personal history exists.
-
-- [ ] Improve addon outcome matching.
-  - Link mailbox outcomes back to the most likely owned auction post by
-    character, realm, item, quantity, and observed time.
-  - Store match confidence and keep unmatched rows for later review.
-  - Estimate time-to-sale and time-to-expiry from matched rows.
-
-- [ ] Add player performance reports.
-  - Report sale rate, average proceeds, expired quantity, and cancelled quantity
-    by item and character.
-  - Show best and worst personal auction items over configurable time windows.
-  - Export player outcome summaries to CSV.
-
-- [ ] Add addon import deduplication.
-  - Generate stable hashes for imported SavedVariables rows.
-  - Skip duplicate owned snapshots and mailbox events across repeated imports.
-  - Report inserted, skipped, and malformed row counts.
-
-- [ ] Expand addon capture details.
-  - Capture deposit cost, auction duration, stack size, and posted unit price
-    when available from the WoW API.
-  - Record whether an owned auction was manually cancelled or naturally
+- [ ] Feature 1: Companion addon capture.
+  - [x] Add minimal WoW companion addon.
+  - [x] Record owned-auction snapshots from the auction house.
+  - [x] Record auction-related mailbox rows for sale/expiry/cancel signals.
+  - [x] Store data in `WowAuctionTrackerDB` SavedVariables.
+  - [ ] Capture deposit cost, auction duration, stack size, and posted unit
+    price when available from the WoW API.
+  - [ ] Record whether an owned auction was manually cancelled or naturally
     expired when the signal is available.
+
+- [ ] Feature 2: Addon import and deduplication.
+  - [x] Parse `WowAuctionTracker.lua`.
+  - [x] Store player auction posts and outcomes in SQLite.
+  - [x] Preserve raw addon rows for classifier improvements.
+  - [ ] Generate stable hashes for imported SavedVariables rows.
+  - [ ] Skip duplicate owned snapshots and mailbox events across repeated
+    imports.
+  - [ ] Report inserted, skipped, and malformed row counts.
+
+- [ ] Feature 3: Player outcome matching and recommendation scoring.
+  - [x] Blend player auction outcomes into recommendations.
+  - [x] Prefer real player outcomes over inferred market sell-through when
+    enough personal history exists.
+  - [ ] Link mailbox outcomes back to the most likely owned auction post by
+    character, realm, item, quantity, and observed time.
+  - [ ] Store match confidence and keep unmatched rows for later review.
+  - [ ] Estimate time-to-sale and time-to-expiry from matched rows.
+
+- [ ] Feature 4: Player performance reports.
+  - [ ] Report sale rate, average proceeds, expired quantity, and cancelled
+    quantity by item and character.
+  - [ ] Show best and worst personal auction items over configurable time
+    windows.
+  - [ ] Export player outcome summaries to CSV.
 
 ## Recommendation Features
 
