@@ -2,6 +2,9 @@ local ADDON_NAME = ...
 local WAT = CreateFrame("Frame")
 
 local MAX_EVENTS = 5000
+local DATA_VERSION = 3
+local purchaseHooksInstalled = false
+local pendingCommodityPurchase = nil
 
 local function Now()
   return time()
@@ -17,10 +20,11 @@ local function EnsureDB()
     WowAuctionTrackerDB = {}
   end
 
-  WowAuctionTrackerDB.version = 1
+  WowAuctionTrackerDB.version = DATA_VERSION
   WowAuctionTrackerDB.events = WowAuctionTrackerDB.events or {}
   WowAuctionTrackerDB.owned_snapshots = WowAuctionTrackerDB.owned_snapshots or {}
   WowAuctionTrackerDB.mail_events = WowAuctionTrackerDB.mail_events or {}
+  WowAuctionTrackerDB.purchase_events = WowAuctionTrackerDB.purchase_events or {}
   WowAuctionTrackerDB.session = WowAuctionTrackerDB.session or {}
 end
 
@@ -33,6 +37,139 @@ local function Append(tableName, row)
   while #WowAuctionTrackerDB[tableName] > MAX_EVENTS do
     table.remove(WowAuctionTrackerDB[tableName], 1)
   end
+end
+
+local function SimpleValue(value)
+  local valueType = type(value)
+  if valueType == "number" or valueType == "string" or valueType == "boolean" or value == nil then
+    return value
+  end
+  return tostring(value)
+end
+
+local function RecordPurchaseEvent(eventType, row)
+  EnsureDB()
+  local character, realm = PlayerName()
+  row = row or {}
+  row.event_type = eventType
+  row.character = row.character or character
+  row.realm = row.realm or realm
+  Append("purchase_events", row)
+end
+
+local function GetCommodityResultInfo(itemID, index)
+  if C_AuctionHouse == nil or C_AuctionHouse.GetCommoditySearchResultInfo == nil then
+    return nil
+  end
+
+  local ok, info = pcall(C_AuctionHouse.GetCommoditySearchResultInfo, itemID, index)
+  if ok and info ~= nil then
+    return info
+  end
+
+  ok, info = pcall(C_AuctionHouse.GetCommoditySearchResultInfo, index)
+  if ok and info ~= nil then
+    return info
+  end
+
+  return nil
+end
+
+local function EstimateCommodityPurchasePrice(itemID, quantity)
+  if C_AuctionHouse == nil or C_AuctionHouse.GetNumCommoditySearchResults == nil then
+    return nil, nil, nil
+  end
+  if itemID == nil or quantity == nil or quantity <= 0 then
+    return nil, nil, nil
+  end
+
+  local ok, resultCount = pcall(C_AuctionHouse.GetNumCommoditySearchResults, itemID)
+  if not ok or resultCount == nil or resultCount <= 0 then
+    return nil, nil, nil
+  end
+
+  local remaining = quantity
+  local totalPrice = 0
+  for index = 1, resultCount do
+    local info = GetCommodityResultInfo(itemID, index)
+    if info ~= nil then
+      local available = info.quantity or 0
+      local unitPrice = info.unitPrice or info.buyoutAmount
+      if available > 0 and unitPrice ~= nil then
+        local purchased = math.min(remaining, available)
+        totalPrice = totalPrice + (purchased * unitPrice)
+        remaining = remaining - purchased
+        if remaining <= 0 then
+          return math.floor(totalPrice / quantity), totalPrice, "commodity_search_results_estimate"
+        end
+      end
+    end
+  end
+
+  return nil, nil, nil
+end
+
+local function BuildCommodityPurchaseRow(eventType, itemID, quantity)
+  local unitPrice, totalPrice, priceSource = EstimateCommodityPurchasePrice(itemID, quantity)
+  if unitPrice == nil and pendingCommodityPurchase ~= nil and pendingCommodityPurchase.item_id == itemID then
+    unitPrice = pendingCommodityPurchase.unit_price
+    totalPrice = pendingCommodityPurchase.total_price
+    priceSource = pendingCommodityPurchase.price_source
+  end
+
+  local row = {
+    market = "commodity",
+    item_id = itemID,
+    quantity = quantity,
+    unit_price = unitPrice,
+    total_price = totalPrice,
+    price_source = priceSource,
+  }
+
+  if eventType == "commodity_purchase_started" or eventType == "commodity_purchase_confirmed" then
+    pendingCommodityPurchase = {
+      item_id = itemID,
+      quantity = quantity,
+      unit_price = unitPrice,
+      total_price = totalPrice,
+      price_source = priceSource,
+    }
+  end
+
+  return row
+end
+
+local function InstallPurchaseHooks()
+  if purchaseHooksInstalled then
+    return
+  end
+  if C_AuctionHouse == nil or hooksecurefunc == nil then
+    return
+  end
+
+  if C_AuctionHouse.StartCommoditiesPurchase ~= nil then
+    hooksecurefunc(C_AuctionHouse, "StartCommoditiesPurchase", function(itemID, quantity)
+      RecordPurchaseEvent("commodity_purchase_started", BuildCommodityPurchaseRow("commodity_purchase_started", itemID, quantity))
+    end)
+  end
+
+  if C_AuctionHouse.ConfirmCommoditiesPurchase ~= nil then
+    hooksecurefunc(C_AuctionHouse, "ConfirmCommoditiesPurchase", function(itemID, quantity)
+      RecordPurchaseEvent("commodity_purchase_confirmed", BuildCommodityPurchaseRow("commodity_purchase_confirmed", itemID, quantity))
+    end)
+  end
+
+  if C_AuctionHouse.PlaceBid ~= nil then
+    hooksecurefunc(C_AuctionHouse, "PlaceBid", function(auctionID, bidAmount)
+      RecordPurchaseEvent("bid_or_buyout_placed", {
+        market = "realm",
+        auction_id = auctionID,
+        total_price = bidAmount,
+      })
+    end)
+  end
+
+  purchaseHooksInstalled = true
 end
 
 local function MoneyFromOwnedAuction(info)
@@ -175,9 +312,11 @@ end
 local function PrintStatus()
   EnsureDB()
   print(string.format(
-    "WoW Auction Tracker: %d owned rows, %d mail rows. SavedVariables update after /reload or logout.",
+    "WoW Auction Tracker v%d: %d owned rows, %d mail rows, %d purchase rows. SavedVariables update after /reload or logout.",
+    WowAuctionTrackerDB.version or 0,
     #WowAuctionTrackerDB.owned_snapshots,
-    #WowAuctionTrackerDB.mail_events
+    #WowAuctionTrackerDB.mail_events,
+    #WowAuctionTrackerDB.purchase_events
   ))
 end
 
@@ -214,13 +353,18 @@ SafeRegisterEvent("AUCTION_HOUSE_SHOW")
 SafeRegisterEvent("AUCTION_HOUSE_CLOSED")
 SafeRegisterEvent("OWNED_AUCTIONS_UPDATED")
 SafeRegisterEvent("AUCTION_HOUSE_AUCTION_CREATED")
+SafeRegisterEvent("AUCTION_HOUSE_PURCHASE_COMPLETED")
+SafeRegisterEvent("COMMODITY_PURCHASE_SUCCEEDED")
+SafeRegisterEvent("COMMODITY_PURCHASE_FAILED")
 SafeRegisterEvent("MAIL_SHOW")
 SafeRegisterEvent("MAIL_INBOX_UPDATE")
 WAT:SetScript("OnEvent", function(_, event, ...)
   if event == "ADDON_LOADED" and ... == ADDON_NAME then
     EnsureDB()
+    InstallPurchaseHooks()
   elseif event == "PLAYER_LOGIN" then
     EnsureDB()
+    InstallPurchaseHooks()
     local character, realm = PlayerName()
     WowAuctionTrackerDB.session.character = character
     WowAuctionTrackerDB.session.realm = realm
@@ -251,6 +395,66 @@ WAT:SetScript("OnEvent", function(_, event, ...)
     end)
   elseif event == "AUCTION_HOUSE_CLOSED" then
     RecordOwnedAuctionSnapshot("auction_house_closed")
+  elseif event == "AUCTION_HOUSE_PURCHASE_COMPLETED" then
+    local auctionID, itemID, quantity, totalPrice, unitPrice = ...
+    if auctionID ~= nil and auctionID ~= 0 or itemID ~= nil or totalPrice ~= nil or unitPrice ~= nil then
+      RecordPurchaseEvent("auction_purchase_completed", {
+        market = "realm",
+        auction_id = auctionID,
+        item_id = itemID,
+        quantity = quantity,
+        total_price = totalPrice,
+        unit_price = unitPrice,
+        event_arg1 = SimpleValue(auctionID),
+        event_arg2 = SimpleValue(itemID),
+        event_arg3 = SimpleValue(quantity),
+        event_arg4 = SimpleValue(totalPrice),
+        event_arg5 = SimpleValue(unitPrice),
+      })
+    end
+  elseif event == "COMMODITY_PURCHASE_SUCCEEDED" then
+    local itemID, quantity, totalPrice, unitPrice = ...
+    if itemID == nil and pendingCommodityPurchase ~= nil then
+      itemID = pendingCommodityPurchase.item_id
+    end
+    if quantity == nil and pendingCommodityPurchase ~= nil then
+      quantity = pendingCommodityPurchase.quantity
+    end
+    if totalPrice == nil and pendingCommodityPurchase ~= nil then
+      totalPrice = pendingCommodityPurchase.total_price
+    end
+    if unitPrice == nil and pendingCommodityPurchase ~= nil then
+      unitPrice = pendingCommodityPurchase.unit_price
+    end
+    RecordPurchaseEvent("commodity_purchase_succeeded", {
+      market = "commodity",
+      item_id = itemID,
+      quantity = quantity,
+      total_price = totalPrice,
+      unit_price = unitPrice,
+      price_source = pendingCommodityPurchase and pendingCommodityPurchase.price_source or nil,
+      event_arg1 = SimpleValue(itemID),
+      event_arg2 = SimpleValue(quantity),
+      event_arg3 = SimpleValue(totalPrice),
+      event_arg4 = SimpleValue(unitPrice),
+    })
+    pendingCommodityPurchase = nil
+  elseif event == "COMMODITY_PURCHASE_FAILED" then
+    local itemID, quantity = ...
+    if itemID == nil and pendingCommodityPurchase ~= nil then
+      itemID = pendingCommodityPurchase.item_id
+    end
+    if quantity == nil and pendingCommodityPurchase ~= nil then
+      quantity = pendingCommodityPurchase.quantity
+    end
+    RecordPurchaseEvent("commodity_purchase_failed", {
+      market = "commodity",
+      item_id = itemID,
+      quantity = quantity,
+      event_arg1 = SimpleValue(itemID),
+      event_arg2 = SimpleValue(quantity),
+    })
+    pendingCommodityPurchase = nil
   elseif event == "MAIL_SHOW" or event == "MAIL_INBOX_UPDATE" then
     RecordAuctionMail()
   end

@@ -1,8 +1,8 @@
 ## Interface: 120007
 ## Title: WoW Auction Tracker
-## Notes: Exports player auction posts and mail outcomes for wow_auction_tracker.
+## Notes: Exports player auction posts, mail outcomes, and purchase events for wow_auction_tracker.
 ## Author: wow_auction_tracker
-## Version: 0.1.0
+## Version: 0.1.1
 ## SavedVariables: WowAuctionTrackerDB
 
 WowAuctionTracker.lua

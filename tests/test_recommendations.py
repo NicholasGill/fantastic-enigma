@@ -55,6 +55,85 @@ def test_recommendations_score_discounted_item_with_quantity_drop(tmp_path: Path
     assert any("below recent median" in reason for reason in recommendations[0].reasons)
 
 
+def test_recommendations_penalize_falling_price_trend(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+
+    for index, price in enumerate([10000, 10000, 10000, 5000], start=1):
+        run_id = repository.start_fetch_run(config)
+        listings = [
+            AuctionListing(
+                auction_id=index,
+                item_id=210930,
+                market=Market.COMMODITY,
+                quantity=10,
+                unit_price=price,
+                buyout=None,
+                bid=None,
+                time_left="LONG",
+                raw={"id": index, "item": {"id": 210930}},
+            )
+        ]
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+        )
+
+    recommendation = RecommendationEngine(f"sqlite:///{db_path}", lookback_runs=4).recommend()[0]
+
+    assert recommendation.price_trend_score == 25
+    assert recommendation.price_trend_ratio == -0.25
+    assert recommendation.score < 35
+    assert recommendation.action == "avoid"
+    assert any("price trend is down" in reason for reason in recommendation.reasons)
+
+
+def test_recommendations_reward_rising_price_trend(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+
+    for index, price in enumerate([5000, 5000, 7500, 7500], start=1):
+        run_id = repository.start_fetch_run(config)
+        listings = [
+            AuctionListing(
+                auction_id=index,
+                item_id=210930,
+                market=Market.COMMODITY,
+                quantity=10,
+                unit_price=price,
+                buyout=None,
+                bid=None,
+                time_left="LONG",
+                raw={"id": index, "item": {"id": 210930}},
+            )
+        ]
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+        )
+
+    recommendation = RecommendationEngine(f"sqlite:///{db_path}", lookback_runs=4).recommend()[0]
+
+    assert recommendation.price_trend_score == 100
+    assert recommendation.price_trend_ratio == 0.5
+    assert recommendation.score >= 25
+    assert any("price trend is up" in reason for reason in recommendation.reasons)
+
+
 def test_recommendations_require_enough_snapshots(tmp_path: Path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")

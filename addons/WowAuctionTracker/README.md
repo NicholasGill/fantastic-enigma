@@ -19,6 +19,10 @@ character whose auctions you want to track.
 - Owned auction snapshots while the auction house is open.
 - Auction-created events followed by owned-auction snapshots.
 - Auction-related mailbox rows when the mailbox is opened or updated.
+- Auction purchase events and purchase intents when the auction house purchase
+  APIs fire. Commodity purchases include a best-effort price estimate from the
+  visible commodity search results when WoW does not include price fields in the
+  purchase success event.
 
 Data is written to:
 
@@ -39,3 +43,7 @@ WoW writes SavedVariables on `/reload`, logout, or game exit.
 Mailbox outcome classification is conservative and English-client oriented.
 Rows are stored with the raw mail subject and money/item fields so the Python
 importer can improve classification later.
+
+Purchase tracking is best effort because Blizzard's auction events do not
+always include the same item and price fields for every purchase path. The addon
+stores raw event fields alongside normalized fields when available.

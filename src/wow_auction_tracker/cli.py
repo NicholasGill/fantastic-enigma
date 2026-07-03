@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run the dashboard with Flask's development reloader.",
     )
+    dashboard_parser.add_argument(
+        "--addon-saved-variables",
+        type=Path,
+        default=os.getenv("WOW_AUCTION_TRACKER_SAVED_VARIABLES"),
+        help="Path to WowAuctionTracker.lua for dashboard addon imports.",
+    )
     recommend_parser = subparsers.add_parser("recommend", help="Rank tracked items from snapshot history.")
     recommend_parser.add_argument(
         "--limit",
@@ -194,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
                 port=args.port,
                 dev_mode=args.dev_mode,
                 reload=args.reload,
+                addon_saved_variables_path=args.addon_saved_variables,
             )
         )
         return 0
@@ -253,7 +260,8 @@ def main(argv: list[str] | None = None) -> int:
         import_id = repository.import_addon_data(result)
         print(
             f"Imported addon data {import_id}: "
-            f"{len(result.posts)} owned auction rows, {len(result.outcomes)} mail rows"
+            f"{len(result.posts)} owned auction rows, {len(result.outcomes)} mail rows, "
+            f"{len(result.purchases)} purchase rows"
         )
         return 0
 
@@ -371,12 +379,16 @@ def _print_recommendations(recommendations: list[Recommendation]) -> None:
         print("No recommendations available")
         return
 
-    print("Action  Score  Conf  Item ID  Name                 Buy/Unit  Sell/Unit  Deposit  Profit    Sell Source    Reasons")
+    print(
+        "Action  Score  Trend  Conf  Item ID  Name                 "
+        "Buy/Unit  Sell/Unit  Deposit  Profit    Sell Source    Reasons"
+    )
     for item in recommendations:
         reasons = "; ".join(item.reasons)
         print(
             f"{item.action:<6}  "
             f"{item.score:>5}  "
+            f"{item.price_trend_score:>5}  "
             f"{item.confidence:>4}  "
             f"{item.item_id:<7}  "
             f"{item.name[:20]:<20} "
@@ -470,6 +482,8 @@ _LATEST_EXPORT_FIELDNAMES = [
     "vendor_sell_unit_price",
     "auction_deposit_unit_price",
     "estimated_profit_unit_price",
+    "price_trend_score",
+    "price_trend_ratio",
     "best_buy_time",
     "best_sell_time",
     "historical_buy_price",
@@ -514,6 +528,8 @@ _RECOMMENDATION_EXPORT_FIELDNAMES = [
     "average_median_unit_price",
     "average_third_quartile_unit_price",
     "average_weighted_unit_price",
+    "price_trend_score",
+    "price_trend_ratio",
     "estimated_demand_score",
     "average_sell_through_ratio",
     "average_sell_through_confidence",
@@ -596,6 +612,8 @@ def _latest_rows_for_export(overview: dict[str, object]) -> list[dict[str, objec
                 "vendor_sell_unit_price": recommendation["vendor_sell_unit_price"] if recommendation else "",
                 "auction_deposit_unit_price": recommendation["auction_deposit_unit_price"] if recommendation else "",
                 "estimated_profit_unit_price": recommendation["estimated_profit_unit_price"] if recommendation else "",
+                "price_trend_score": recommendation["price_trend_score"] if recommendation else "",
+                "price_trend_ratio": recommendation["price_trend_ratio"] if recommendation else "",
                 "best_buy_time": recommendation["best_buy_time"] if recommendation else "",
                 "best_sell_time": recommendation["best_sell_time"] if recommendation else "",
                 "historical_buy_price": recommendation["historical_buy_price"] if recommendation else "",
@@ -661,6 +679,8 @@ def _recommendation_rows_for_export(recommendations: list[Recommendation]) -> li
             "average_median_unit_price": item.average_median_unit_price,
             "average_third_quartile_unit_price": item.average_third_quartile_unit_price,
             "average_weighted_unit_price": item.average_weighted_unit_price,
+            "price_trend_score": item.price_trend_score,
+            "price_trend_ratio": item.price_trend_ratio,
             "estimated_demand_score": item.estimated_demand_score,
             "average_sell_through_ratio": item.average_sell_through_ratio,
             "average_sell_through_confidence": item.average_sell_through_confidence,

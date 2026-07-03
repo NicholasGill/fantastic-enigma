@@ -125,10 +125,12 @@ uv run wow-auctions export recommendations --limit 10
 
 Recommendations are conservative estimates based on current price versus recent
 median price, inferred sell-through, recent quantity drops, listing scarcity,
-snapshot count, and imported player auction outcomes when available. Blizzard's
-auction APIs expose current listings, not completed purchases, so imported
-personal sale and expiry signals are preferred over inferred market
-sell-through once enough personal history exists.
+recent price trend, snapshot count, and imported player auction outcomes when
+available. Blizzard's auction APIs expose current listings, not completed
+purchases, so imported personal sale and expiry signals are preferred over
+inferred market sell-through once enough personal history exists. Trend score is
+shown as a 0-100 market-risk signal: 50 is flat, higher is rising, and lower is
+falling.
 
 Recommendation output includes a recommended per-unit sell price when there is
 inferred sale evidence. It uses the average unit price of disappeared listings
@@ -151,7 +153,8 @@ World of Warcraft/_retail_/Interface/AddOns/WowAuctionTracker
 ```
 
 In game, use `/wat scan` at the auction house and `/wat mail` at the mailbox.
-The addon records owned-auction snapshots and auction-related mailbox rows to:
+The addon records owned-auction snapshots, auction-related mailbox rows, and
+best-effort purchase events to:
 
 ```text
 World of Warcraft/_retail_/WTF/Account/<ACCOUNT>/SavedVariables/WowAuctionTracker.lua

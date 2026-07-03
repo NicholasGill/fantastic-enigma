@@ -34,6 +34,8 @@ class RecommendationInputs:
     average_weighted_unit_price: int | None
     average_listing_count: float
     average_total_quantity: float
+    price_trend_score: int
+    price_trend_ratio: float
     recent_quantity_drop_ratio: float
     average_sell_through_ratio: float
     average_sell_through_confidence: int
@@ -70,6 +72,8 @@ class Recommendation:
     average_median_unit_price: int | None
     average_third_quartile_unit_price: int | None
     average_weighted_unit_price: int | None
+    price_trend_score: int
+    price_trend_ratio: float
     estimated_demand_score: int
     average_sell_through_ratio: float
     average_sell_through_confidence: int
@@ -191,6 +195,12 @@ class RecommendationEngine:
             for row in rows
             if row["weighted_average_unit_price"] is not None
         ]
+        trend_prices = [
+            int(row["weighted_average_unit_price"] or row["median_unit_price"])
+            for row in rows
+            if row["weighted_average_unit_price"] is not None or row["median_unit_price"] is not None
+        ]
+        price_trend_ratio = _price_trend_ratio(trend_prices)
         listing_counts = [int(row["listing_count"]) for row in rows]
         quantities = [int(row["total_quantity"]) for row in rows]
         sell_through = _load_sell_through_inputs(
@@ -224,6 +234,8 @@ class RecommendationEngine:
             average_weighted_unit_price=int(mean(weighted_averages)) if weighted_averages else None,
             average_listing_count=mean(listing_counts) if listing_counts else 0.0,
             average_total_quantity=mean(quantities) if quantities else 0.0,
+            price_trend_score=_price_trend_score(price_trend_ratio),
+            price_trend_ratio=price_trend_ratio,
             recent_quantity_drop_ratio=_recent_drop_ratio(quantities),
             average_sell_through_ratio=sell_through[0],
             average_sell_through_confidence=sell_through[1],
@@ -264,6 +276,8 @@ class RecommendationEngine:
                 average_median_unit_price=inputs.average_median_unit_price,
                 average_third_quartile_unit_price=inputs.average_third_quartile_unit_price,
                 average_weighted_unit_price=inputs.average_weighted_unit_price,
+                price_trend_score=inputs.price_trend_score,
+                price_trend_ratio=inputs.price_trend_ratio,
                 estimated_demand_score=0,
                 average_sell_through_ratio=inputs.average_sell_through_ratio,
                 average_sell_through_confidence=inputs.average_sell_through_confidence,
@@ -296,7 +310,8 @@ class RecommendationEngine:
         if player_confidence > 0:
             demand_score = _player_blended_demand_score(demand_score, inputs.player_sale_rate, player_confidence)
             confidence = max(confidence, player_confidence)
-        score = round((price_score * 0.45) + (demand_score * 0.25) + (scarcity_score * 0.15) + (confidence * 0.15))
+        base_score = round((price_score * 0.45) + (demand_score * 0.25) + (scarcity_score * 0.15) + (confidence * 0.15))
+        score = base_score + _price_trend_adjustment(inputs.price_trend_score)
         action = _action_for_score(score)
 
         return Recommendation(
@@ -315,6 +330,8 @@ class RecommendationEngine:
             average_median_unit_price=inputs.average_median_unit_price,
             average_third_quartile_unit_price=inputs.average_third_quartile_unit_price,
             average_weighted_unit_price=inputs.average_weighted_unit_price,
+            price_trend_score=inputs.price_trend_score,
+            price_trend_ratio=inputs.price_trend_ratio,
             estimated_demand_score=max(0, min(demand_score, 100)),
             average_sell_through_ratio=inputs.average_sell_through_ratio,
             average_sell_through_confidence=inputs.average_sell_through_confidence,
@@ -356,6 +373,8 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "average_median_unit_price": recommendation.average_median_unit_price,
         "average_third_quartile_unit_price": recommendation.average_third_quartile_unit_price,
         "average_weighted_unit_price": recommendation.average_weighted_unit_price,
+        "price_trend_score": recommendation.price_trend_score,
+        "price_trend_ratio": recommendation.price_trend_ratio,
         "estimated_demand_score": recommendation.estimated_demand_score,
         "average_sell_through_ratio": recommendation.average_sell_through_ratio,
         "average_sell_through_confidence": recommendation.average_sell_through_confidence,
@@ -390,6 +409,28 @@ def _price_discount_score(latest_min: int | None, average_median: int | None) ->
         return 0
     discount_ratio = (average_median - latest_min) / average_median
     return round(max(0.0, min(discount_ratio, 1.0)) * 100)
+
+
+def _price_trend_ratio(prices: list[int]) -> float:
+    prices = [price for price in prices if price > 0]
+    if len(prices) < 3:
+        return 0.0
+
+    midpoint = len(prices) // 2
+    earlier = prices[:midpoint]
+    recent = prices[midpoint:]
+    earlier_average = mean(earlier)
+    if earlier_average <= 0:
+        return 0.0
+    return (mean(recent) - earlier_average) / earlier_average
+
+
+def _price_trend_score(price_trend_ratio: float) -> int:
+    return round(max(0.0, min(100.0, 50 + (price_trend_ratio * 100))))
+
+
+def _price_trend_adjustment(price_trend_score: int) -> int:
+    return round((price_trend_score - 50) * 0.25)
 
 
 def _recommended_sell_price(inputs: RecommendationInputs) -> int | None:
@@ -760,6 +801,10 @@ def _reasons(
         )
     if scarcity_score > 0:
         reasons.append(f"listing count is {scarcity_score}% below recent average")
+    if inputs.price_trend_score < 45:
+        reasons.append(f"recent price trend is down {round(abs(inputs.price_trend_ratio) * 100)}%")
+    elif inputs.price_trend_score > 55:
+        reasons.append(f"recent price trend is up {round(inputs.price_trend_ratio * 100)}%")
     if inputs.snapshots > 0:
         reasons.append(f"based on {inputs.snapshots} snapshots")
     return reasons or ["no strong pricing or demand signal"]

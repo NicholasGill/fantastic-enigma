@@ -25,7 +25,12 @@ from wow_auction_tracker.config import Market, TrackerConfig, TrackedItem
 from wow_auction_tracker.features.lifecycle import ListingObservation, ListingSnapshot, listing_key_from_parts
 from wow_auction_tracker.features.metadata import ItemMetadata
 from wow_auction_tracker.features.opportunities import BuyOpportunityObservation
-from wow_auction_tracker.features.player import AddonImportResult, PlayerAuctionOutcome, PlayerAuctionPost
+from wow_auction_tracker.features.player import (
+    AddonImportResult,
+    PlayerAuctionOutcome,
+    PlayerAuctionPost,
+    PlayerAuctionPurchase,
+)
 from wow_auction_tracker.features.sellthrough import SellThroughMetric
 
 
@@ -63,9 +68,11 @@ class AddonImportRecord(Base):
     addon_version: Mapped[int | None] = mapped_column(Integer)
     owned_snapshot_count: Mapped[int] = mapped_column(Integer, nullable=False)
     mail_event_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    purchase_event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     posts: Mapped[list[PlayerAuctionPostRecord]] = relationship(back_populates="import_record")
     outcomes: Mapped[list[PlayerAuctionOutcomeRecord]] = relationship(back_populates="import_record")
+    purchases: Mapped[list[PlayerAuctionPurchaseRecord]] = relationship(back_populates="import_record")
 
 
 class TrackedItemRecord(Base):
@@ -260,6 +267,26 @@ class PlayerAuctionOutcomeRecord(Base):
     raw_json: Mapped[str] = mapped_column(Text, nullable=False)
 
     import_record: Mapped[AddonImportRecord] = relationship(back_populates="outcomes")
+
+
+class PlayerAuctionPurchaseRecord(Base):
+    __tablename__ = "player_auction_purchases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    addon_import_id: Mapped[int] = mapped_column(ForeignKey("addon_imports.id"), nullable=False, index=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    character: Mapped[str | None] = mapped_column(String(128), index=True)
+    realm: Mapped[str | None] = mapped_column(String(128), index=True)
+    market: Mapped[str | None] = mapped_column(String(32))
+    auction_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    item_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    quantity: Mapped[int | None] = mapped_column(Integer)
+    unit_price: Mapped[int | None] = mapped_column(Integer)
+    total_price: Mapped[int | None] = mapped_column(Integer)
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    import_record: Mapped[AddonImportRecord] = relationship(back_populates="purchases")
 
 
 def create_db_engine(database_url: str) -> Engine:
@@ -635,14 +662,41 @@ class AuctionRepository:
                 record.updated_at = now
             session.commit()
 
-    def import_addon_data(self, result: AddonImportResult) -> int:
+    def import_addon_data(self, result: AddonImportResult, *, replace_existing_source: bool = True) -> int:
         with Session(self.engine) as session:
+            if replace_existing_source:
+                existing_import_ids = list(
+                    session.scalars(
+                        select(AddonImportRecord.id).where(AddonImportRecord.source_path == str(result.source_path))
+                    ).all()
+                )
+                if existing_import_ids:
+                    session.execute(
+                        delete(PlayerAuctionPostRecord).where(
+                            PlayerAuctionPostRecord.addon_import_id.in_(existing_import_ids)
+                        )
+                    )
+                    session.execute(
+                        delete(PlayerAuctionOutcomeRecord).where(
+                            PlayerAuctionOutcomeRecord.addon_import_id.in_(existing_import_ids)
+                        )
+                    )
+                    session.execute(
+                        delete(PlayerAuctionPurchaseRecord).where(
+                            PlayerAuctionPurchaseRecord.addon_import_id.in_(existing_import_ids)
+                        )
+                    )
+                    session.execute(
+                        delete(AddonImportRecord).where(AddonImportRecord.id.in_(existing_import_ids))
+                    )
+
             import_record = AddonImportRecord(
                 imported_at=datetime.now(UTC),
                 source_path=str(result.source_path),
                 addon_version=result.addon_version,
                 owned_snapshot_count=len(result.posts),
                 mail_event_count=len(result.outcomes),
+                purchase_event_count=len(result.purchases),
             )
             session.add(import_record)
             session.flush()
@@ -682,6 +736,24 @@ class AuctionRepository:
                         outcome=outcome.outcome,
                         money=outcome.money,
                         raw_json=json.dumps(outcome.raw, sort_keys=True),
+                    )
+                )
+
+            for purchase in result.purchases:
+                session.add(
+                    PlayerAuctionPurchaseRecord(
+                        addon_import_id=import_record.id,
+                        observed_at=purchase.observed_at,
+                        event_type=purchase.event_type,
+                        character=purchase.character,
+                        realm=purchase.realm,
+                        market=purchase.market,
+                        auction_id=purchase.auction_id,
+                        item_id=purchase.item_id,
+                        quantity=purchase.quantity,
+                        unit_price=purchase.unit_price,
+                        total_price=purchase.total_price,
+                        raw_json=json.dumps(purchase.raw, sort_keys=True),
                     )
                 )
 
@@ -826,9 +898,17 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
                 source_path text not null,
                 addon_version integer,
                 owned_snapshot_count integer not null,
-                mail_event_count integer not null
+                mail_event_count integer not null,
+                purchase_event_count integer not null default 0
             )
             """
+        )
+        _ensure_sqlite_columns(
+            connection,
+            "addon_imports",
+            {
+                "purchase_event_count": "integer not null default 0",
+            },
         )
         connection.exec_driver_sql(
             """
@@ -872,6 +952,26 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
             )
             """
         )
+        connection.exec_driver_sql(
+            """
+            create table if not exists player_auction_purchases (
+                id integer primary key,
+                addon_import_id integer not null,
+                observed_at datetime,
+                event_type varchar(64) not null,
+                character varchar(128),
+                realm varchar(128),
+                market varchar(32),
+                auction_id integer,
+                item_id integer,
+                quantity integer,
+                unit_price integer,
+                total_price integer,
+                raw_json text not null,
+                foreign key(addon_import_id) references addon_imports (id)
+            )
+            """
+        )
         for table, column in (
             ("player_auction_posts", "addon_import_id"),
             ("player_auction_posts", "observed_at"),
@@ -886,6 +986,13 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
             ("player_auction_outcomes", "realm"),
             ("player_auction_outcomes", "item_id"),
             ("player_auction_outcomes", "outcome"),
+            ("player_auction_purchases", "addon_import_id"),
+            ("player_auction_purchases", "observed_at"),
+            ("player_auction_purchases", "event_type"),
+            ("player_auction_purchases", "character"),
+            ("player_auction_purchases", "realm"),
+            ("player_auction_purchases", "auction_id"),
+            ("player_auction_purchases", "item_id"),
         ):
             connection.exec_driver_sql(f"create index if not exists ix_{table}_{column} on {table} ({column})")
 

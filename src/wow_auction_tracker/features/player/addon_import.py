@@ -40,11 +40,27 @@ class PlayerAuctionOutcome:
 
 
 @dataclass(frozen=True)
+class PlayerAuctionPurchase:
+    observed_at: datetime | None
+    event_type: str
+    character: str | None
+    realm: str | None
+    market: str | None
+    auction_id: int | None
+    item_id: int | None
+    quantity: int | None
+    unit_price: int | None
+    total_price: int | None
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class AddonImportResult:
     source_path: Path
     addon_version: int | None
     posts: list[PlayerAuctionPost]
     outcomes: list[PlayerAuctionOutcome]
+    purchases: list[PlayerAuctionPurchase]
 
 
 def import_saved_variables(path: Path) -> AddonImportResult:
@@ -54,11 +70,15 @@ def import_saved_variables(path: Path) -> AddonImportResult:
 
     owned_rows = _list_of_dicts(payload.get("owned_snapshots"))
     mail_rows = _list_of_dicts(payload.get("mail_events"))
+    purchase_rows = _dedupe_purchase_rows(
+        _enrich_purchase_rows(_list_of_dicts(payload.get("purchase_events")))
+    )
     return AddonImportResult(
         source_path=path,
         addon_version=_int_or_none(payload.get("version")),
         posts=[_post_from_row(row) for row in owned_rows],
         outcomes=[_outcome_from_row(row) for row in mail_rows],
+        purchases=[_purchase_from_row(row) for row in purchase_rows],
     )
 
 
@@ -82,18 +102,111 @@ def _post_from_row(row: dict[str, Any]) -> PlayerAuctionPost:
 
 
 def _outcome_from_row(row: dict[str, Any]) -> PlayerAuctionOutcome:
+    subject_name, subject_count = parse_auction_mail_subject(_str_or_none(row.get("subject")))
     return PlayerAuctionOutcome(
         observed_at=_datetime_from_epoch(row.get("observed_at")),
         character=_str_or_none(row.get("character")),
         realm=_str_or_none(row.get("realm")),
         mail_index=_int_or_none(row.get("mail_index")),
         item_id=_int_or_none(row.get("first_item_id")),
-        item_name=_str_or_none(row.get("first_item_name")),
-        item_count=_int_or_none(row.get("first_item_count")) or _int_or_none(row.get("item_count")),
+        item_name=_str_or_none(row.get("first_item_name")) or subject_name,
+        item_count=(
+            _int_or_none(row.get("first_item_count"))
+            or subject_count
+            or _int_or_none(row.get("item_count"))
+        ),
         outcome=_str_or_none(row.get("outcome")) or "unknown",
         money=_int_or_none(row.get("money")),
         raw=row,
     )
+
+
+def _purchase_from_row(row: dict[str, Any]) -> PlayerAuctionPurchase:
+    return PlayerAuctionPurchase(
+        observed_at=_datetime_from_epoch(row.get("observed_at")),
+        event_type=_str_or_none(row.get("event_type")) or "unknown",
+        character=_str_or_none(row.get("character")),
+        realm=_str_or_none(row.get("realm")),
+        market=_str_or_none(row.get("market")),
+        auction_id=_int_or_none(row.get("auction_id")),
+        item_id=_int_or_none(row.get("item_id")),
+        quantity=_int_or_none(row.get("quantity")),
+        unit_price=_int_or_none(row.get("unit_price")),
+        total_price=_int_or_none(row.get("total_price")),
+        raw=row,
+    )
+
+
+def _enrich_purchase_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    pending_commodity: dict[str, Any] | None = None
+    for row in rows:
+        row = dict(row)
+        event_type = _str_or_none(row.get("event_type"))
+        if event_type in {"commodity_purchase_started", "commodity_purchase_confirmed"}:
+            pending_commodity = row
+        elif (
+            event_type in {"commodity_purchase_succeeded", "commodity_purchase_failed"}
+            and pending_commodity is not None
+        ):
+            for field in ("item_id", "quantity", "unit_price", "total_price", "price_source"):
+                if row.get(field) is None and pending_commodity.get(field) is not None:
+                    row[field] = pending_commodity[field]
+            pending_commodity = None
+        enriched.append(row)
+    return enriched
+
+
+def _dedupe_purchase_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for row in rows:
+        if _is_empty_purchase_completion(row):
+            continue
+        key = (
+            _int_or_none(row.get("observed_at")),
+            _str_or_none(row.get("event_type")),
+            _str_or_none(row.get("character")),
+            _str_or_none(row.get("realm")),
+            _str_or_none(row.get("market")),
+            _int_or_none(row.get("auction_id")),
+            _int_or_none(row.get("item_id")),
+            _int_or_none(row.get("quantity")),
+            _int_or_none(row.get("unit_price")),
+            _int_or_none(row.get("total_price")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def _is_empty_purchase_completion(row: dict[str, Any]) -> bool:
+    event_type = _str_or_none(row.get("event_type"))
+    if event_type != "auction_purchase_completed":
+        return False
+    auction_id = _int_or_none(row.get("auction_id"))
+    return (
+        (auction_id is None or auction_id == 0)
+        and _int_or_none(row.get("item_id")) is None
+        and _int_or_none(row.get("quantity")) is None
+        and _int_or_none(row.get("unit_price")) is None
+        and _int_or_none(row.get("total_price")) is None
+    )
+
+
+def parse_auction_mail_subject(subject: str | None) -> tuple[str | None, int | None]:
+    if subject is None:
+        return (None, None)
+    match = re.search(
+        r"auction successful:\s*(?P<name>.+?)\s*\((?P<count>[0-9,]+)\)",
+        subject,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return (None, None)
+    return (match.group("name").strip(), int(match.group("count").replace(",", "")))
 
 
 def _parse_saved_variables(text: str) -> Any:

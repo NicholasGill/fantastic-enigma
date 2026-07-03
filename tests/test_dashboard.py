@@ -5,6 +5,7 @@ from wow_auction_tracker.auction import AuctionListing, summarize_listings
 from wow_auction_tracker.config import Market, TrackerConfig
 from wow_auction_tracker.features.opportunities import BuyOpportunityObservation
 from wow_auction_tracker.features.player import AddonImportResult, PlayerAuctionOutcome, PlayerAuctionPost
+from wow_auction_tracker.features.player import PlayerAuctionPurchase
 from wow_auction_tracker.features.dashboard.server import (
     DASHBOARD_HTML,
     DashboardConfig,
@@ -193,14 +194,92 @@ def test_dashboard_flask_app_serves_html_and_json(tmp_path: Path) -> None:
 
     client = app.test_client()
     html_response = client.get("/")
+    player_html_response = client.get("/my-auctions")
     overview_response = client.get("/api/overview")
     missing_history_response = client.get("/api/history")
 
     assert html_response.status_code == 200
+    assert player_html_response.status_code == 200
     assert b"WoW Auction Tracker" in html_response.data
+    assert b"My Auctions" in player_html_response.data
     assert overview_response.status_code == 200
     assert overview_response.get_json()["counts"]["fetch_runs"] == 0
     assert missing_history_response.status_code == 400
+
+
+def test_dashboard_can_import_addon_saved_variables(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    saved_variables = tmp_path / "WowAuctionTracker.lua"
+    saved_variables.write_text(
+        """
+        WowAuctionTrackerDB = {
+          ["version"] = 1,
+          ["owned_snapshots"] = {
+            {
+              ["observed_at"] = 1710000000,
+              ["snapshot_id"] = "Alice-1710000000",
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["auction_id"] = 42,
+              ["item_id"] = 210930,
+              ["quantity"] = 5,
+              ["unit_price"] = 10000,
+            },
+          },
+          ["mail_events"] = {
+            {
+              ["observed_at"] = 1710000300,
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["mail_index"] = 1,
+              ["outcome"] = "sold",
+              ["money"] = 45000,
+              ["subject"] = "Auction successful: Bismuth (5)",
+            },
+          },
+          ["purchase_events"] = {
+            {
+              ["observed_at"] = 1710000400,
+              ["event_type"] = "commodity_purchase_succeeded",
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["market"] = "commodity",
+              ["item_id"] = 210930,
+              ["quantity"] = 5,
+              ["unit_price"] = 9000,
+              ["total_price"] = 45000,
+            },
+          },
+        }
+        """,
+        encoding="utf-8",
+    )
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    app = create_dashboard_app(
+        DashboardConfig(
+            database_url=f"sqlite:///{db_path}",
+            host="127.0.0.1",
+            port=8000,
+            addon_saved_variables_path=saved_variables,
+        )
+    )
+
+    client = app.test_client()
+    import_response = client.post("/api/import-addon")
+    overview_response = client.get("/api/overview")
+    activity = overview_response.get_json()["player_activity"]
+
+    assert import_response.status_code == 200
+    assert import_response.get_json()["owned_snapshot_count"] == 1
+    assert import_response.get_json()["purchase_event_count"] == 1
+    assert activity["summary"]["listing_count"] == 1
+    assert activity["summary"]["sold_count"] == 1
+    assert activity["summary"]["purchase_count"] == 1
+    assert activity["outcomes"][0]["money"] == 45000
+    assert activity["outcomes"][0]["name"] == "Bismuth"
+    assert activity["outcomes"][0]["item_count"] == 5
+    assert activity["purchases"][0]["total_price"] == 45000
 
 
 def test_dashboard_overview_returns_player_activity(tmp_path: Path) -> None:
@@ -282,6 +361,21 @@ def test_dashboard_overview_returns_player_activity(tmp_path: Path) -> None:
                     raw={"outcome": "sold"},
                 )
             ],
+            purchases=[
+                PlayerAuctionPurchase(
+                    observed_at=datetime(2026, 7, 1, 5, 20, tzinfo=UTC),
+                    event_type="commodity_purchase_succeeded",
+                    character="Arces",
+                    realm="Dalaran",
+                    market="commodity",
+                    auction_id=None,
+                    item_id=219946,
+                    quantity=100,
+                    unit_price=80,
+                    total_price=8000,
+                    raw={"event_type": "commodity_purchase_succeeded"},
+                )
+            ],
         )
     )
 
@@ -291,10 +385,91 @@ def test_dashboard_overview_returns_player_activity(tmp_path: Path) -> None:
     assert activity["latest_import"]["owned_snapshot_count"] == 1
     assert activity["summary"]["listing_count"] == 1
     assert activity["summary"]["sold_count"] == 1
+    assert activity["summary"]["purchase_count"] == 1
     assert activity["listings"][0]["name"] == "Storm Dust"
     assert activity["listings"][0]["unit_price"] == 86
+    assert activity["purchases"][0]["name"] == "Storm Dust"
+    assert activity["purchases"][0]["total_price"] == 8000
     assert activity["outcomes"][0]["outcome"] == "sold"
     assert activity["buy_opportunities"][0]["potential_profit"] == 50000
+
+
+def test_dashboard_infers_outcome_item_from_owned_quantity_drop(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {
+            "items": [
+                {"id": 219946, "name": "Storm Dust", "market": "commodity"},
+                {"id": 219947, "name": "Storm Dust", "market": "commodity"},
+            ]
+        }
+    )
+    run_id = repository.start_fetch_run(config)
+    repository.complete_fetch_run(run_id, [], [])
+    repository.import_addon_data(
+        AddonImportResult(
+            source_path=tmp_path / "WowAuctionTracker.lua",
+            addon_version=1,
+            posts=[
+                PlayerAuctionPost(
+                    observed_at=datetime(2026, 7, 2, 18, 38, tzinfo=UTC),
+                    snapshot_id="snapshot-1",
+                    reason="owned_auctions_updated",
+                    character="Arces",
+                    realm="Dalaran",
+                    auction_id=100,
+                    item_id=219946,
+                    quantity=5647,
+                    unit_price=13,
+                    buyout=74400,
+                    bid_amount=None,
+                    time_left_seconds=43184,
+                    status="0",
+                    raw={"auction_id": 100},
+                ),
+                PlayerAuctionPost(
+                    observed_at=datetime(2026, 7, 2, 22, 49, tzinfo=UTC),
+                    snapshot_id="snapshot-2",
+                    reason="owned_auctions_updated",
+                    character="Arces",
+                    realm="Dalaran",
+                    auction_id=100,
+                    item_id=219946,
+                    quantity=3225,
+                    unit_price=23,
+                    buyout=74400,
+                    bid_amount=None,
+                    time_left_seconds=28137,
+                    status="0",
+                    raw={"auction_id": 100},
+                ),
+            ],
+            outcomes=[
+                PlayerAuctionOutcome(
+                    observed_at=datetime(2026, 7, 2, 22, 49, tzinfo=UTC),
+                    character="Arces",
+                    realm="Dalaran",
+                    mail_index=1,
+                    item_id=None,
+                    item_name=None,
+                    item_count=None,
+                    outcome="sold",
+                    money=173911710,
+                    raw={"subject": "Auction successful: Storm Dust (2422)"},
+                )
+            ],
+            purchases=[],
+        )
+    )
+
+    activity = DashboardDataStore(f"sqlite:///{db_path}").overview()["player_activity"]
+
+    assert activity["outcomes"][0]["name"] == "Storm Dust"
+    assert activity["outcomes"][0]["item_count"] == 2422
+    assert activity["outcomes"][0]["item_id"] == 219946
 
 
 def test_format_file_size() -> None:
@@ -318,12 +493,15 @@ def test_dashboard_table_headers_have_tooltips() -> None:
     assert "function profit" in DASHBOARD_HTML
     assert "buy-opportunity" in DASHBOARD_HTML
     assert "My Listings" in DASHBOARD_HTML
+    assert "My Buys" in DASHBOARD_HTML
     assert "Buy Signals" in DASHBOARD_HTML
     assert "Auction Outcomes" in DASHBOARD_HTML
     assert 'role="tablist"' in DASHBOARD_HTML
     assert 'data-tab="player"' in DASHBOARD_HTML
     assert 'id="player-panel"' in DASHBOARD_HTML
     assert "setActiveTab" in DASHBOARD_HTML
+    assert "tabFromPath" in DASHBOARD_HTML
+    assert "navigateTab" in DASHBOARD_HTML
     assert "renderPlayerActivity" in DASHBOARD_HTML
     assert "source-badge" in DASHBOARD_HTML
     assert "sellSourceBadge" in DASHBOARD_HTML

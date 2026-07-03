@@ -9,7 +9,9 @@ from typing import Any
 from flask import Flask, Response, jsonify, request
 from sqlalchemy.engine import make_url
 
+from wow_auction_tracker.features.player import import_saved_variables, parse_auction_mail_subject
 from wow_auction_tracker.features.recommendations import RecommendationEngine, recommendation_to_dict
+from wow_auction_tracker.storage import AuctionRepository, create_db_engine
 
 DEFAULT_DISPLAY_TIMEZONE = "America/New_York"
 DASHBOARD_TIMEZONES = {
@@ -29,6 +31,7 @@ class DashboardConfig:
     port: int
     dev_mode: bool = False
     reload: bool = False
+    addon_saved_variables_path: Path | None = None
 
 
 class DashboardDataStore:
@@ -84,11 +87,15 @@ class DashboardDataStore:
                 item["recommendation_score"] = recommendation.get("score")
                 item["recommendation_confidence"] = recommendation.get("confidence")
                 item["average_sell_through_ratio"] = recommendation.get("average_sell_through_ratio")
-                item["average_sell_through_ratio_bps"] = round(float(recommendation.get("average_sell_through_ratio") or 0) * 10000)
+                item["average_sell_through_ratio_bps"] = round(
+                    float(recommendation.get("average_sell_through_ratio") or 0) * 10000
+                )
                 item["average_probable_sold_unit_price"] = recommendation.get("average_probable_sold_unit_price")
                 item["vendor_sell_unit_price"] = recommendation.get("vendor_sell_unit_price")
                 item["auction_deposit_unit_price"] = recommendation.get("auction_deposit_unit_price")
                 item["estimated_profit_unit_price"] = recommendation.get("estimated_profit_unit_price")
+                item["price_trend_score"] = recommendation.get("price_trend_score")
+                item["price_trend_ratio"] = recommendation.get("price_trend_ratio")
                 item["best_buy_time"] = recommendation.get("best_buy_time")
                 item["best_sell_time"] = recommendation.get("best_sell_time")
                 item["historical_buy_price"] = recommendation.get("historical_buy_price")
@@ -157,6 +164,38 @@ class DashboardDataStore:
             "history": [dict(row) for row in rows],
         }
 
+    def import_addon_data(self, saved_variables_path: Path | None = None) -> dict[str, Any]:
+        path = saved_variables_path or self._latest_addon_source_path()
+        if path is None:
+            raise ValueError("No addon SavedVariables path is configured or previously imported")
+        if not path.exists():
+            raise ValueError(f"Addon SavedVariables file does not exist: {path}")
+
+        result = import_saved_variables(path)
+        repository = AuctionRepository(create_db_engine(self.database_url))
+        import_id = repository.import_addon_data(result)
+        return {
+            "import_id": import_id,
+            "source_path": str(path),
+            "owned_snapshot_count": len(result.posts),
+            "mail_event_count": len(result.outcomes),
+            "purchase_event_count": len(result.purchases),
+        }
+
+    def _latest_addon_source_path(self) -> Path | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select source_path
+                from addon_imports
+                order by id desc
+                limit 1
+                """
+            ).fetchone()
+        if row is None or not row["source_path"]:
+            return None
+        return Path(str(row["source_path"]))
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
@@ -186,6 +225,7 @@ class DashboardDataStore:
             "addon_imports",
             "player_auction_posts",
             "player_auction_outcomes",
+            "player_auction_purchases",
         )
         return {
             table: int(connection.execute(f"select count(*) from {table}").fetchone()[0])
@@ -301,7 +341,7 @@ class DashboardDataStore:
     def _player_activity(connection: sqlite3.Connection) -> dict[str, Any]:
         latest_import = connection.execute(
             """
-            select id, imported_at, source_path, owned_snapshot_count, mail_event_count
+            select id, imported_at, source_path, owned_snapshot_count, mail_event_count, purchase_event_count
             from addon_imports
             order by id desc
             limit 1
@@ -352,11 +392,34 @@ class DashboardDataStore:
                 coalesce(m.name, o.item_name, t.name, 'Item ' || o.item_id) as name,
                 o.item_count,
                 o.outcome,
-                o.money
+                o.money,
+                o.raw_json
             from player_auction_outcomes o
             left join item_metadata m on m.item_id = o.item_id
             left join tracked_items t on t.item_id = o.item_id
             order by o.observed_at desc, o.id desc
+            limit 12
+            """
+        ).fetchall()
+        purchases = connection.execute(
+            """
+            select
+                p.id,
+                p.observed_at,
+                p.event_type,
+                p.character,
+                p.realm,
+                p.market,
+                p.auction_id,
+                p.item_id,
+                coalesce(m.name, t.name, 'Item ' || p.item_id) as name,
+                p.quantity,
+                p.unit_price,
+                p.total_price
+            from player_auction_purchases p
+            left join item_metadata m on m.item_id = p.item_id
+            left join tracked_items t on t.item_id = p.item_id
+            order by p.observed_at desc, p.id desc
             limit 12
             """
         ).fetchall()
@@ -393,6 +456,10 @@ class DashboardDataStore:
                     from player_auction_posts) as listing_count,
                 (select count(*) from player_auction_outcomes where outcome = 'sold') as sold_count,
                 (select coalesce(sum(money), 0) from player_auction_outcomes where outcome = 'sold') as sold_money,
+                (select count(*) from player_auction_purchases) as purchase_count,
+                (select coalesce(sum(total_price), 0) from player_auction_purchases
+                    where event_type in ('auction_purchase_completed', 'commodity_purchase_succeeded')
+                ) as purchase_money,
                 (select count(*) from buy_opportunity_observations) as buy_opportunity_count
             """
         ).fetchone()
@@ -400,7 +467,8 @@ class DashboardDataStore:
             "latest_import": dict(latest_import) if latest_import else None,
             "summary": dict(summary) if summary else {},
             "listings": [dict(row) for row in listings],
-            "outcomes": [dict(row) for row in outcomes],
+            "outcomes": _enriched_player_outcomes(connection, outcomes),
+            "purchases": [dict(row) for row in purchases],
             "buy_opportunities": [dict(row) for row in buy_opportunities],
         }
 
@@ -415,6 +483,8 @@ def create_dashboard_app(config: DashboardConfig) -> Flask:
         return response
 
     @app.get("/")
+    @app.get("/my-auctions")
+    @app.get("/market")
     def _index() -> Response:
         return Response(DASHBOARD_HTML, mimetype="text/html")
 
@@ -433,6 +503,14 @@ def create_dashboard_app(config: DashboardConfig) -> Flask:
         except ValueError:
             return jsonify({"error": "item_id must be an integer"}), 400
         return jsonify(store.item_history(item_id))
+
+    @app.post("/api/import-addon")
+    def _import_addon() -> Response | tuple[Response, int]:
+        try:
+            result = store.import_addon_data(config.addon_saved_variables_path)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify(result)
 
     return app
 
@@ -470,6 +548,123 @@ def _sqlite_database_path(database_url: str) -> str:
 
 def _dashboard_timezone(value: str) -> str:
     return value if value in DASHBOARD_TIMEZONES else DEFAULT_DISPLAY_TIMEZONE
+
+
+def _enriched_player_outcomes(
+    connection: sqlite3.Connection,
+    rows: list[sqlite3.Row],
+) -> list[dict[str, Any]]:
+    name_to_item_id = _item_ids_by_name(connection)
+    sold_quantity_to_item_id = _item_ids_by_name_and_sold_quantity(connection)
+    outcomes: list[dict[str, Any]] = []
+    for row in rows:
+        outcome = dict(row)
+        raw_json = str(outcome.pop("raw_json") or "{}")
+        subject_name, subject_count = _auction_mail_subject_item_from_raw_json(raw_json)
+        if outcome.get("name") is None and subject_name:
+            outcome["name"] = subject_name
+        if outcome.get("item_count") is None and subject_count is not None:
+            outcome["item_count"] = subject_count
+        if outcome.get("item_id") is None and subject_name:
+            subject_key = _item_name_key(subject_name)
+            quantity = outcome.get("item_count")
+            if quantity is not None:
+                outcome["item_id"] = sold_quantity_to_item_id.get((subject_key, int(quantity)))
+            if outcome.get("item_id") is None:
+                outcome["item_id"] = name_to_item_id.get(subject_key)
+        outcomes.append(outcome)
+    return outcomes
+
+
+def _item_ids_by_name_and_sold_quantity(connection: sqlite3.Connection) -> dict[tuple[str, int], int]:
+    rows = connection.execute(
+        """
+        select
+            p.auction_id,
+            p.observed_at,
+            p.id,
+            p.item_id,
+            coalesce(m.name, t.name) as name,
+            p.quantity
+        from player_auction_posts p
+        left join item_metadata m on m.item_id = p.item_id
+        left join tracked_items t on t.item_id = p.item_id
+        where p.auction_id is not null
+            and p.item_id is not null
+            and p.quantity is not null
+            and coalesce(m.name, t.name) is not null
+        order by p.auction_id, p.observed_at, p.id
+        """
+    ).fetchall()
+    previous_by_auction: dict[int, tuple[str, int, int]] = {}
+    mapping: dict[tuple[str, int], int] = {}
+    ambiguous: set[tuple[str, int]] = set()
+    seen_rows: set[tuple[int, str, int]] = set()
+    for row in rows:
+        auction_id = int(row["auction_id"])
+        quantity = int(row["quantity"])
+        observed_at = str(row["observed_at"])
+        row_key = (auction_id, observed_at, quantity)
+        if row_key in seen_rows:
+            continue
+        seen_rows.add(row_key)
+
+        name = _item_name_key(str(row["name"]))
+        item_id = int(row["item_id"])
+        previous = previous_by_auction.get(auction_id)
+        if previous is not None:
+            previous_name, previous_item_id, previous_quantity = previous
+            sold_quantity = previous_quantity - quantity
+            if sold_quantity > 0 and previous_name == name and previous_item_id == item_id:
+                key = (name, sold_quantity)
+                if key in mapping and mapping[key] != item_id:
+                    ambiguous.add(key)
+                else:
+                    mapping[key] = item_id
+        previous_by_auction[auction_id] = (name, item_id, quantity)
+
+    for key in ambiguous:
+        mapping.pop(key, None)
+    return mapping
+
+
+def _item_ids_by_name(connection: sqlite3.Connection) -> dict[str, int]:
+    rows = connection.execute(
+        """
+        select coalesce(m.name, t.name) as name, t.item_id
+        from tracked_items t
+        left join item_metadata m on m.item_id = t.item_id
+        where coalesce(m.name, t.name) is not null
+        order by t.item_id
+        """
+    ).fetchall()
+    mapping: dict[str, int] = {}
+    ambiguous: set[str] = set()
+    for row in rows:
+        key = _item_name_key(str(row["name"]))
+        item_id = int(row["item_id"])
+        if key in mapping and mapping[key] != item_id:
+            ambiguous.add(key)
+            continue
+        mapping[key] = item_id
+    for key in ambiguous:
+        mapping.pop(key, None)
+    return mapping
+
+
+def _auction_mail_subject_item_from_raw_json(raw_json: str) -> tuple[str | None, int | None]:
+    try:
+        raw = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return (None, None)
+    subject = raw.get("subject")
+    if not isinstance(subject, str):
+        return (None, None)
+    return parse_auction_mail_subject(subject)
+
+
+def _item_name_key(name: str) -> str:
+    return " ".join(name.casefold().split())
 
 
 def _has_buy_opportunity(min_unit_price: object, recommended_buy_price: object) -> bool:
@@ -1031,6 +1226,7 @@ DASHBOARD_HTML = """<!doctype html>
       <label class="auto-refresh"><input id="auto-refresh" type="checkbox" checked>Auto 30s</label>
       <span class="dev-mode" id="dev-mode-status">Dev Mode</span>
       <span class="refresh-status" id="refresh-status">Not refreshed</span>
+      <button id="import-addon" type="button">Import Addon</button>
       <button id="refresh" type="button">Refresh</button>
     </div>
   </header>
@@ -1043,6 +1239,7 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="metric"><span>New Listings</span><strong id="new-listings">-</strong></div>
       <div class="metric"><span>Missing Listings</span><strong id="missing-listings">-</strong></div>
       <div class="metric"><span>My Listings</span><strong id="my-listings">-</strong></div>
+      <div class="metric"><span>My Buys</span><strong id="my-buys">-</strong></div>
       <div class="metric"><span>Buy Signals</span><strong id="buy-signals">-</strong></div>
     </div>
 
@@ -1071,6 +1268,7 @@ DASHBOARD_HTML = """<!doctype html>
                     <th>Sell / Unit<span class="column-help" tabindex="0" title="Recommended per-unit sell price from inferred sold listings, including disappeared listings classified as probable sales and listings whose quantity decreased." aria-label="Recommended per-unit sell price from inferred sold listings, including disappeared listings classified as probable sales and listings whose quantity decreased.">?</span></th>
                     <th>Deposit / Unit<span class="column-help" tabindex="0" title="Estimated 48-hour auction deposit per unit from Blizzard vendor sell price metadata." aria-label="Estimated 48-hour auction deposit per unit from Blizzard vendor sell price metadata.">?</span></th>
                     <th>Profit / Unit<span class="column-help" tabindex="0" title="Potential per-unit profit after subtracting estimated 48-hour auction deposit from recommended sell price minus recommended buy price." aria-label="Potential per-unit profit after subtracting estimated 48-hour auction deposit from recommended sell price minus recommended buy price.">?</span></th>
+                    <th>Trend<span class="column-help" tabindex="0" title="Recent price trend score from historical per-unit prices. 50 is flat, above 50 is rising, below 50 is falling." aria-label="Recent price trend score from historical per-unit prices. 50 is flat, above 50 is rising, below 50 is falling.">?</span></th>
                     <th>Sell-through<span class="column-help" tabindex="0" title="Estimated demand signal from recent disappeared listings; this is inferred and not confirmed sales." aria-label="Estimated demand signal from recent disappeared listings; this is inferred and not confirmed sales.">?</span></th>
                     <th>Min Change<span class="column-help" tabindex="0" title="Change from the latest minimum price to the last different previous minimum price." aria-label="Change from the latest minimum price to the last different previous minimum price.">?</span></th>
                     <th>Listings<span class="column-help" tabindex="0" title="Number of active auction listings found for this item in the latest snapshot." aria-label="Number of active auction listings found for this item in the latest snapshot.">?</span></th>
@@ -1121,6 +1319,24 @@ DASHBOARD_HTML = """<!doctype html>
                 </tr>
               </thead>
               <tbody id="my-listings-table"></tbody>
+            </table>
+          </div>
+        </section>
+        <section>
+          <div class="section-head"><h2>My Buys</h2></div>
+          <div class="mini-table-wrap">
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th>Qty</th>
+                  <th>Unit</th>
+                  <th>Total</th>
+                  <th>Event</th>
+                  <th>Seen</th>
+                </tr>
+              </thead>
+              <tbody id="my-buys-table"></tbody>
             </table>
           </div>
         </section>
@@ -1176,12 +1392,14 @@ DASHBOARD_HTML = """<!doctype html>
       newListings: document.getElementById('new-listings'),
       missingListings: document.getElementById('missing-listings'),
       myListings: document.getElementById('my-listings'),
+      myBuys: document.getElementById('my-buys'),
       buySignals: document.getElementById('buy-signals'),
       latestTime: document.getElementById('latest-time'),
       items: document.getElementById('items'),
       recommendations: document.getElementById('recommendations'),
       myListingsNote: document.getElementById('my-listings-note'),
       myListingsTable: document.getElementById('my-listings-table'),
+      myBuysTable: document.getElementById('my-buys-table'),
       buySignalsTable: document.getElementById('buy-signals-table'),
       auctionOutcomesTable: document.getElementById('auction-outcomes-table'),
       runs: document.getElementById('runs'),
@@ -1189,6 +1407,7 @@ DASHBOARD_HTML = """<!doctype html>
       timezone: document.getElementById('timezone'),
       autoRefresh: document.getElementById('auto-refresh'),
       devModeStatus: document.getElementById('dev-mode-status'),
+      importAddon: document.getElementById('import-addon'),
       refresh: document.getElementById('refresh'),
       tabButtons: Array.from(document.querySelectorAll('[data-tab]')),
       tabPanels: Array.from(document.querySelectorAll('[data-panel]')),
@@ -1247,6 +1466,14 @@ DASHBOARD_HTML = """<!doctype html>
       return { text: gold(value), cls: value > 0 ? 'delta-down' : value < 0 ? 'delta-up' : 'muted' };
     }
 
+    function trend(value) {
+      if (value === null || value === undefined) {
+        return { text: '-', cls: 'muted' };
+      }
+      const cls = value > 55 ? 'delta-down' : value < 45 ? 'delta-up' : 'muted';
+      return { text: integer(value), cls };
+    }
+
     function sellSourceLabel(source) {
       const labels = {
         probable_sold: 'sold'
@@ -1285,6 +1512,27 @@ DASHBOARD_HTML = """<!doctype html>
       }
     }
 
+    async function importAddonData() {
+      els.importAddon.disabled = true;
+      els.refreshStatus.textContent = 'Importing addon...';
+      try {
+        const response = await fetch(`/api/import-addon?t=${Date.now()}`, {
+          method: 'POST',
+          cache: 'no-store'
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || 'Import failed');
+        }
+        els.refreshStatus.textContent = `Imported ${integer(payload.owned_snapshot_count)} listings, ${integer(payload.mail_event_count)} mail rows, ${integer(payload.purchase_event_count)} purchase rows`;
+        await loadOverview();
+      } catch (error) {
+        els.refreshStatus.textContent = error.message || 'Import failed';
+      } finally {
+        els.importAddon.disabled = false;
+      }
+    }
+
     function renderOverview() {
       els.dbSize.textContent = overview.database.size_label;
       els.fetchRuns.textContent = integer(overview.counts.fetch_runs);
@@ -1293,6 +1541,7 @@ DASHBOARD_HTML = """<!doctype html>
       els.newListings.textContent = integer(overview.latest_lifecycle.new);
       els.missingListings.textContent = integer(overview.latest_lifecycle.missing);
       els.myListings.textContent = integer(overview.player_activity?.summary?.listing_count);
+      els.myBuys.textContent = integer(overview.player_activity?.summary?.purchase_count);
       els.buySignals.textContent = integer(overview.player_activity?.summary?.buy_opportunity_count);
       els.latestTime.textContent = overview.latest_run ? shortTime(overview.latest_run.finished_at) : '-';
       document.body.classList.toggle('dev-mode-active', Boolean(overview.dev_mode));
@@ -1310,6 +1559,7 @@ DASHBOARD_HTML = """<!doctype html>
       els.items.innerHTML = rows.map((item) => {
         const change = delta(item.min_unit_price, item.previous_min_unit_price);
         const potentialProfit = profit(item.estimated_profit_unit_price);
+        const priceTrend = trend(item.price_trend_score);
         const sellThroughBps = item.average_sell_through_ratio_bps ?? item.sell_through_ratio_bps;
         const rowClasses = [
           item.item_id === selectedItemId ? 'selected' : '',
@@ -1328,6 +1578,7 @@ DASHBOARD_HTML = """<!doctype html>
           <td>${gold(item.recommended_sell_price)}${sellSourceBadge(item.recommended_sell_price_source)}</td>
           <td>${gold(item.auction_deposit_unit_price)}</td>
           <td class="${potentialProfit.cls}">${potentialProfit.text}</td>
+          <td class="${priceTrend.cls}">${priceTrend.text}</td>
           <td>${bps(sellThroughBps)}</td>
           <td class="${change.cls}">${change.text}</td>
           <td>${integer(item.listing_count)}</td>
@@ -1366,7 +1617,7 @@ DASHBOARD_HTML = """<!doctype html>
             <strong title="${item.name}">${item.name}</strong>
             <span class="score">${item.score}</span>
           </div>
-          <div class="reasons">${gold(item.recommended_buy_price)} buy, ${gold(item.recommended_sell_price)} sell (${sellSourceLabel(item.recommended_sell_price_source) || 'unknown'}), ${gold(item.auction_deposit_unit_price)} deposit, ${gold(item.estimated_profit_unit_price)} net, ${item.confidence}% confidence</div>
+          <div class="reasons">${gold(item.recommended_buy_price)} buy, ${gold(item.recommended_sell_price)} sell (${sellSourceLabel(item.recommended_sell_price_source) || 'unknown'}), ${gold(item.auction_deposit_unit_price)} deposit, ${gold(item.estimated_profit_unit_price)} net, ${item.price_trend_score} trend, ${item.confidence}% confidence</div>
           ${timing}
           <div class="reasons">${item.reasons.join('; ')}</div>
         </div>`;
@@ -1391,6 +1642,18 @@ DASHBOARD_HTML = """<!doctype html>
           <td>${shortTime(row.observed_at)}</td>
         </tr>`;
       }).join('') : '<tr><td colspan="5" class="muted">No addon listings imported.</td></tr>';
+
+      const purchases = activity.purchases || [];
+      els.myBuysTable.innerHTML = purchases.length ? purchases.map((row) => {
+        return `<tr>
+          <td>${itemName(row.name)}<br><span class="muted">#${row.item_id || row.auction_id || '-'}</span></td>
+          <td>${integer(row.quantity)}</td>
+          <td>${gold(row.unit_price)}</td>
+          <td>${gold(row.total_price)}</td>
+          <td>${row.event_type || '-'}</td>
+          <td>${shortTime(row.observed_at)}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="6" class="muted">No purchase events imported yet.</td></tr>';
 
       const opportunities = activity.buy_opportunities || [];
       els.buySignalsTable.innerHTML = opportunities.length ? opportunities.map((row) => {
@@ -1425,6 +1688,23 @@ DASHBOARD_HTML = """<!doctype html>
       els.tabPanels.forEach((panel) => {
         panel.classList.toggle('active', panel.dataset.panel === tabName);
       });
+    }
+
+    function tabFromPath() {
+      if (window.location.pathname === '/my-auctions') return 'player';
+      return 'market';
+    }
+
+    function pathForTab(tabName) {
+      return tabName === 'player' ? '/my-auctions' : '/market';
+    }
+
+    function navigateTab(tabName) {
+      setActiveTab(tabName);
+      const path = pathForTab(tabName);
+      if (window.location.pathname !== path) {
+        window.history.pushState({ tab: tabName }, '', path);
+      }
     }
 
     async function selectItem(itemId) {
@@ -1517,12 +1797,15 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     els.refresh.addEventListener('click', () => loadOverview());
+    els.importAddon.addEventListener('click', () => importAddonData());
     els.timezone.addEventListener('change', () => loadOverview());
     els.autoRefresh.addEventListener('change', startAutoRefresh);
     els.filter.addEventListener('input', renderItems);
     els.tabButtons.forEach((button) => {
-      button.addEventListener('click', () => setActiveTab(button.dataset.tab));
+      button.addEventListener('click', () => navigateTab(button.dataset.tab));
     });
+    window.addEventListener('popstate', () => setActiveTab(tabFromPath()));
+    setActiveTab(tabFromPath());
     loadOverview({ refreshSelected: false });
     startAutoRefresh();
   </script>

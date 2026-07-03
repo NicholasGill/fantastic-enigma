@@ -294,6 +294,15 @@ def test_import_addon_command_stores_saved_variables(capsys: pytest.CaptureFixtu
           ["mail_events"] = {
             { ["outcome"] = "expired", ["first_item_id"] = 210930, ["first_item_count"] = 5 },
           },
+          ["purchase_events"] = {
+            {
+              ["event_type"] = "commodity_purchase_succeeded",
+              ["item_id"] = 210930,
+              ["quantity"] = 5,
+              ["unit_price"] = 10000,
+              ["total_price"] = 50000,
+            },
+          },
         }
         """,
         encoding="utf-8",
@@ -309,4 +318,4 @@ def test_import_addon_command_stores_saved_variables(capsys: pytest.CaptureFixtu
     captured = capsys.readouterr().out
 
     assert exit_code == 0
-    assert "1 owned auction rows, 1 mail rows" in captured
+    assert "1 owned auction rows, 1 mail rows, 1 purchase rows" in captured

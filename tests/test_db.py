@@ -18,6 +18,7 @@ from wow_auction_tracker.storage import (
     ListingObservationRecord,
     PlayerAuctionOutcomeRecord,
     PlayerAuctionPostRecord,
+    PlayerAuctionPurchaseRecord,
     SellThroughMetricRecord,
     TrackedItemRecord,
     create_db_engine,
@@ -324,6 +325,19 @@ def test_repository_imports_player_addon_rows(tmp_path) -> None:
               ["first_item_count"] = 5,
             },
           },
+          ["purchase_events"] = {
+            {
+              ["observed_at"] = 1710000600,
+              ["event_type"] = "commodity_purchase_succeeded",
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["market"] = "commodity",
+              ["item_id"] = 210930,
+              ["quantity"] = 5,
+              ["unit_price"] = 9000,
+              ["total_price"] = 45000,
+            },
+          },
         }
         """,
         encoding="utf-8",
@@ -337,6 +351,7 @@ def test_repository_imports_player_addon_rows(tmp_path) -> None:
     with Session(engine) as session:
         posts = session.scalars(select(PlayerAuctionPostRecord)).all()
         outcomes = session.scalars(select(PlayerAuctionOutcomeRecord)).all()
+        purchases = session.scalars(select(PlayerAuctionPurchaseRecord)).all()
 
     assert import_id == 1
     assert len(posts) == 1
@@ -344,3 +359,87 @@ def test_repository_imports_player_addon_rows(tmp_path) -> None:
     assert len(outcomes) == 1
     assert outcomes[0].outcome == "sold"
     assert outcomes[0].money == 45000
+    assert len(purchases) == 1
+    assert purchases[0].event_type == "commodity_purchase_succeeded"
+    assert purchases[0].total_price == 45000
+
+    second_import_id = repository.import_addon_data(import_saved_variables(saved_variables))
+    with Session(engine) as session:
+        posts = session.scalars(select(PlayerAuctionPostRecord)).all()
+        outcomes = session.scalars(select(PlayerAuctionOutcomeRecord)).all()
+        purchases = session.scalars(select(PlayerAuctionPurchaseRecord)).all()
+
+    assert second_import_id == 1
+    assert len(posts) == 1
+    assert len(outcomes) == 1
+    assert len(purchases) == 1
+
+
+def test_import_addon_dedupes_purchase_events_and_skips_empty_completion(tmp_path) -> None:
+    from wow_auction_tracker.features.player import import_saved_variables
+
+    saved_variables = tmp_path / "WowAuctionTracker.lua"
+    saved_variables.write_text(
+        """
+        WowAuctionTrackerDB = {
+          ["version"] = 3,
+          ["purchase_events"] = {
+            {
+              ["observed_at"] = 1710000600,
+              ["event_type"] = "commodity_purchase_started",
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["market"] = "commodity",
+              ["item_id"] = 210803,
+              ["quantity"] = 6,
+              ["unit_price"] = 100,
+              ["total_price"] = 600,
+            },
+            {
+              ["observed_at"] = 1710000600,
+              ["event_type"] = "commodity_purchase_started",
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["market"] = "commodity",
+              ["item_id"] = 210803,
+              ["quantity"] = 6,
+              ["unit_price"] = 100,
+              ["total_price"] = 600,
+            },
+            {
+              ["observed_at"] = 1710000601,
+              ["event_type"] = "commodity_purchase_succeeded",
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["market"] = "commodity",
+            },
+            {
+              ["observed_at"] = 1710000602,
+              ["event_type"] = "auction_purchase_completed",
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["market"] = "realm",
+              ["auction_id"] = 0,
+            },
+          },
+        }
+        """,
+        encoding="utf-8",
+    )
+    engine = create_db_engine("sqlite:///:memory:")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+
+    repository.import_addon_data(import_saved_variables(saved_variables))
+
+    with Session(engine) as session:
+        purchases = session.scalars(select(PlayerAuctionPurchaseRecord).order_by(PlayerAuctionPurchaseRecord.id)).all()
+
+    assert [purchase.event_type for purchase in purchases] == [
+        "commodity_purchase_started",
+        "commodity_purchase_succeeded",
+    ]
+    assert purchases[0].unit_price == 100
+    assert purchases[1].item_id == 210803
+    assert purchases[1].quantity == 6
+    assert purchases[1].total_price == 600
