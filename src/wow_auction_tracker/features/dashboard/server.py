@@ -83,6 +83,7 @@ class DashboardDataStore:
                 item["recommended_buy_price"] = recommendation.get("recommended_buy_price")
                 item["recommended_sell_price"] = recommendation.get("recommended_sell_price")
                 item["recommended_sell_price_source"] = recommendation.get("recommended_sell_price_source")
+                item["latest_shifted_unit_price"] = recommendation.get("latest_shifted_unit_price")
                 item["recommendation_action"] = recommendation.get("action")
                 item["recommendation_score"] = recommendation.get("score")
                 item["recommendation_confidence"] = recommendation.get("confidence")
@@ -102,7 +103,7 @@ class DashboardDataStore:
                 item["historical_sell_price"] = recommendation.get("historical_sell_price")
                 item["historical_timing_confidence"] = recommendation.get("historical_timing_confidence")
                 item["has_buy_opportunity"] = _has_buy_opportunity(
-                    item.get("min_unit_price"),
+                    recommendation.get("latest_shifted_unit_price") or item.get("min_unit_price"),
                     recommendation.get("recommended_buy_price"),
                 )
             if dev_mode:

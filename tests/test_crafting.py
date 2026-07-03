@@ -69,6 +69,7 @@ def _recommendation(item_id: int, *, sell_price: int, deposit: int) -> Recommend
         score=75,
         confidence=80,
         latest_min_unit_price=900,
+        latest_shifted_unit_price=925,
         latest_median_unit_price=950,
         recommended_buy_price=700,
         recommended_sell_price=sell_price,

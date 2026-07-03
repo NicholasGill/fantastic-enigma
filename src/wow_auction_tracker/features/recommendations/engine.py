@@ -16,6 +16,7 @@ AUCTION_DEPOSIT_RATE_BPS_BY_DURATION_HOURS = {
     48: 6000,
 }
 DEFAULT_AUCTION_DURATION_HOURS = 48
+CURRENT_PRICE_QUANTITY_SHIFT = 5
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class RecommendationInputs:
     market: str
     snapshots: int
     latest_min_unit_price: int | None
+    latest_shifted_unit_price: int | None
     latest_median_unit_price: int | None
     latest_listing_count: int
     latest_total_quantity: int
@@ -64,6 +66,7 @@ class Recommendation:
     score: int
     confidence: int
     latest_min_unit_price: int | None
+    latest_shifted_unit_price: int | None
     latest_median_unit_price: int | None
     recommended_buy_price: int | None
     recommended_sell_price: int | None
@@ -179,6 +182,7 @@ class RecommendationEngine:
         ).fetchall()
         rows = list(reversed(rows))
         latest = rows[-1] if rows else None
+        latest_fetch_run_id = int(latest["fetch_run_id"]) if latest else None
         first_quartiles = [
             int(row["first_quartile_unit_price"])
             for row in rows
@@ -223,6 +227,11 @@ class RecommendationEngine:
             market=str(item_row["market"]),
             snapshots=len(rows),
             latest_min_unit_price=int(latest["min_unit_price"]) if latest and latest["min_unit_price"] is not None else None,
+            latest_shifted_unit_price=(
+                _load_shifted_unit_price(connection, int(item_row["item_id"]), latest_fetch_run_id)
+                if latest_fetch_run_id is not None
+                else None
+            ),
             latest_median_unit_price=(
                 int(latest["median_unit_price"]) if latest and latest["median_unit_price"] is not None else None
             ),
@@ -268,6 +277,7 @@ class RecommendationEngine:
                 score=0,
                 confidence=_confidence(inputs.snapshots, self.lookback_runs),
                 latest_min_unit_price=inputs.latest_min_unit_price,
+                latest_shifted_unit_price=inputs.latest_shifted_unit_price,
                 latest_median_unit_price=inputs.latest_median_unit_price,
                 recommended_buy_price=_recommended_buy_price(inputs),
                 recommended_sell_price=_recommended_sell_price(inputs),
@@ -300,7 +310,7 @@ class RecommendationEngine:
             )
 
         average_price = inputs.average_weighted_unit_price or inputs.average_median_unit_price
-        price_score = _price_discount_score(inputs.latest_min_unit_price, average_price)
+        price_score = _price_discount_score(_latest_market_unit_price(inputs), average_price)
         scarcity_score = _scarcity_score(inputs.latest_listing_count, inputs.average_listing_count)
         demand_score = _demand_score(inputs.recent_quantity_drop_ratio, inputs.average_sell_through_ratio)
         confidence = _confidence(inputs.snapshots, self.lookback_runs)
@@ -322,6 +332,7 @@ class RecommendationEngine:
             score=max(0, min(score, 100)),
             confidence=confidence,
             latest_min_unit_price=inputs.latest_min_unit_price,
+            latest_shifted_unit_price=inputs.latest_shifted_unit_price,
             latest_median_unit_price=inputs.latest_median_unit_price,
             recommended_buy_price=_recommended_buy_price(inputs),
             recommended_sell_price=_recommended_sell_price(inputs),
@@ -363,6 +374,7 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "score": recommendation.score,
         "confidence": recommendation.confidence,
         "latest_min_unit_price": recommendation.latest_min_unit_price,
+        "latest_shifted_unit_price": recommendation.latest_shifted_unit_price,
         "latest_median_unit_price": recommendation.latest_median_unit_price,
         "recommended_buy_price": recommendation.recommended_buy_price,
         "recommended_sell_price": recommendation.recommended_sell_price,
@@ -404,10 +416,10 @@ def _sqlite_database_path(database_url: str) -> str:
     return str(Path(url.database))
 
 
-def _price_discount_score(latest_min: int | None, average_median: int | None) -> int:
-    if latest_min is None or average_median is None or average_median <= 0:
+def _price_discount_score(latest_price: int | None, average_median: int | None) -> int:
+    if latest_price is None or average_median is None or average_median <= 0:
         return 0
-    discount_ratio = (average_median - latest_min) / average_median
+    discount_ratio = (average_median - latest_price) / average_median
     return round(max(0.0, min(discount_ratio, 1.0)) * 100)
 
 
@@ -450,9 +462,65 @@ def _recommended_buy_price(inputs: RecommendationInputs) -> int | None:
 
     deposit = inputs.auction_deposit_unit_price or 0
     target_buy_price = round(max(sell_price - deposit, 0) * 0.8)
-    if inputs.latest_min_unit_price is not None and inputs.latest_min_unit_price <= target_buy_price:
-        return inputs.latest_min_unit_price
+    latest_price = _latest_market_unit_price(inputs)
+    if latest_price is not None and latest_price <= target_buy_price:
+        return latest_price
     return target_buy_price
+
+
+def _latest_market_unit_price(inputs: RecommendationInputs) -> int | None:
+    return (
+        inputs.latest_shifted_unit_price
+        or inputs.latest_median_unit_price
+        or inputs.latest_min_unit_price
+    )
+
+
+def _load_shifted_unit_price(
+    connection: sqlite3.Connection,
+    item_id: int,
+    fetch_run_id: int,
+    *,
+    quantity_shift: int = CURRENT_PRICE_QUANTITY_SHIFT,
+) -> int | None:
+    rows = connection.execute(
+        """
+        select quantity, unit_price, buyout
+        from auction_listings
+        where fetch_run_id = ?
+            and item_id = ?
+            and (unit_price is not null or buyout is not null)
+        order by
+            coalesce(unit_price, buyout / nullif(quantity, 0)),
+            auction_id,
+            id
+        """,
+        (fetch_run_id, item_id),
+    ).fetchall()
+    if not rows:
+        return None
+
+    cumulative_quantity = 0
+    fallback_price: int | None = None
+    for row in rows:
+        quantity = max(int(row["quantity"] or 0), 1)
+        unit_price = _listing_unit_price(row)
+        if unit_price is None:
+            continue
+        fallback_price = unit_price
+        cumulative_quantity += quantity
+        if cumulative_quantity >= quantity_shift:
+            return unit_price
+    return fallback_price
+
+
+def _listing_unit_price(row: sqlite3.Row) -> int | None:
+    if row["unit_price"] is not None:
+        return int(row["unit_price"])
+    quantity = int(row["quantity"] or 0)
+    if quantity <= 0 or row["buyout"] is None:
+        return None
+    return int(row["buyout"]) // quantity
 
 
 def _estimated_profit_unit_price(inputs: RecommendationInputs) -> int | None:
@@ -777,7 +845,7 @@ def _reasons(
 ) -> list[str]:
     reasons: list[str] = []
     if price_score > 0:
-        reasons.append(f"lowest listing is {price_score}% below recent median")
+        reasons.append(f"current market price is {price_score}% below recent median")
     if demand_score > 0:
         if inputs.player_post_count > 0:
             reasons.append(

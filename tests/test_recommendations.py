@@ -55,6 +55,51 @@ def test_recommendations_score_discounted_item_with_quantity_drop(tmp_path: Path
     assert any("below recent median" in reason for reason in recommendations[0].reasons)
 
 
+def test_recommendations_use_five_count_shifted_price_for_discount_signal(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+
+    runs = [
+        [10000, 10000, 10000, 10000],
+        [10000, 10000, 10000, 10000],
+        [5000, 10000, 10000, 10000],
+    ]
+    for run_index, prices in enumerate(runs, start=1):
+        run_id = repository.start_fetch_run(config)
+        listings = [
+            AuctionListing(
+                auction_id=(run_index * 10) + listing_index,
+                item_id=210930,
+                market=Market.COMMODITY,
+                quantity=1,
+                unit_price=price,
+                buyout=None,
+                bid=None,
+                time_left="LONG",
+                raw={"id": (run_index * 10) + listing_index, "item": {"id": 210930}},
+            )
+            for listing_index, price in enumerate(prices)
+        ]
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+        )
+
+    recommendation = RecommendationEngine(f"sqlite:///{db_path}", lookback_runs=3).recommend()[0]
+
+    assert recommendation.latest_min_unit_price == 5000
+    assert recommendation.latest_shifted_unit_price == 10000
+    assert recommendation.score < 35
+    assert recommendation.action == "avoid"
+
+
 def test_recommendations_penalize_falling_price_trend(tmp_path: Path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")

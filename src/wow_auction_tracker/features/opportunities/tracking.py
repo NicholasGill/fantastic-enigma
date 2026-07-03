@@ -5,7 +5,7 @@ from typing import Iterable
 
 from wow_auction_tracker.auction import AuctionListing
 from wow_auction_tracker.features.lifecycle import ListingObservation, listing_key_from_parts
-from wow_auction_tracker.features.recommendations import Recommendation
+from wow_auction_tracker.features.recommendations import CURRENT_PRICE_QUANTITY_SHIFT, Recommendation
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,10 @@ def build_buy_opportunity_observations(
         if unit_price is None or unit_price >= recommendation.recommended_buy_price:
             continue
 
+        available_quantity = available_quantity_by_item[(listing.item_id, listing.market.value)]
+        if available_quantity < CURRENT_PRICE_QUANTITY_SHIFT:
+            continue
+
         observation = observation_by_key.get(_listing_key(listing))
         if observation is None or not _is_new_below_target_listing(observation, recommendation.recommended_buy_price):
             continue
@@ -71,9 +75,7 @@ def build_buy_opportunity_observations(
                     if sell_target is not None
                     else None
                 ),
-                available_quantity_at_or_below_buy_target=available_quantity_by_item[
-                    (listing.item_id, listing.market.value)
-                ],
+                available_quantity_at_or_below_buy_target=available_quantity,
                 recommendation_score=recommendation.score,
                 recommendation_confidence=recommendation.confidence,
                 listing_status=observation.status,

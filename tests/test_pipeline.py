@@ -139,6 +139,47 @@ def test_fetch_and_store_tracks_new_auctions_below_prior_buy_price(tmp_path) -> 
     assert opportunities[0].potential_profit == 6300
 
 
+def test_fetch_and_store_ignores_buy_opportunities_below_shifted_quantity(tmp_path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 124105, "name": "Starlight Rose", "market": "commodity"}]}
+    )
+
+    for quantity in (10, 5, 5):
+        fetch_and_store(
+            config,
+            FakeClient(
+                commodity_payload={
+                    "auctions": [
+                        {"id": 1, "item": {"id": 124105}, "quantity": quantity, "unit_price": 10000}
+                    ]
+                }
+            ),
+            repository,
+        )  # type: ignore[arg-type]
+
+    fetch_and_store(
+        config,
+        FakeClient(
+            commodity_payload={
+                "auctions": [
+                    {"id": 4, "item": {"id": 124105}, "quantity": 4, "unit_price": 7900},
+                    {"id": 5, "item": {"id": 124105}, "quantity": 10, "unit_price": 10000},
+                ]
+            }
+        ),
+        repository,
+    )  # type: ignore[arg-type]
+
+    with Session(engine) as session:
+        opportunities = session.scalars(select(BuyOpportunityObservationRecord)).all()
+
+    assert opportunities == []
+
+
 def test_fetch_and_store_tracks_profitable_craft_opportunities(tmp_path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")
