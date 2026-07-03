@@ -91,40 +91,40 @@ snapshots into useful pricing and demand signals for tracked items.
 
 ## Player Auction Features
 
-- [ ] Feature 1: Companion addon capture.
+- [x] Feature 1: Companion addon capture.
   - [x] Add minimal WoW companion addon.
   - [x] Record owned-auction snapshots from the auction house.
   - [x] Record auction-related mailbox rows for sale/expiry/cancel signals.
   - [x] Store data in `WowAuctionTrackerDB` SavedVariables.
-  - [ ] Capture deposit cost, auction duration, stack size, and posted unit
+  - [x] Capture deposit cost, auction duration, stack size, and posted unit
     price when available from the WoW API.
-  - [ ] Record whether an owned auction was manually cancelled or naturally
+  - [x] Record whether an owned auction was manually cancelled or naturally
     expired when the signal is available.
 
-- [ ] Feature 2: Addon import and deduplication.
+- [x] Feature 2: Addon import and deduplication.
   - [x] Parse `WowAuctionTracker.lua`.
   - [x] Store player auction posts and outcomes in SQLite.
   - [x] Preserve raw addon rows for classifier improvements.
-  - [ ] Generate stable hashes for imported SavedVariables rows.
-  - [ ] Skip duplicate owned snapshots and mailbox events across repeated
+  - [x] Generate stable hashes for imported SavedVariables rows.
+  - [x] Skip duplicate owned snapshots and mailbox events across repeated
     imports.
-  - [ ] Report inserted, skipped, and malformed row counts.
+  - [x] Report inserted, skipped, and malformed row counts.
 
-- [ ] Feature 3: Player outcome matching and recommendation scoring.
+- [x] Feature 3: Player outcome matching and recommendation scoring.
   - [x] Blend player auction outcomes into recommendations.
   - [x] Prefer real player outcomes over inferred market sell-through when
     enough personal history exists.
-  - [ ] Link mailbox outcomes back to the most likely owned auction post by
+  - [x] Link mailbox outcomes back to the most likely owned auction post by
     character, realm, item, quantity, and observed time.
-  - [ ] Store match confidence and keep unmatched rows for later review.
-  - [ ] Estimate time-to-sale and time-to-expiry from matched rows.
+  - [x] Store match confidence and keep unmatched rows for later review.
+  - [x] Estimate time-to-sale and time-to-expiry from matched rows.
 
-- [ ] Feature 4: Player performance reports.
-  - [ ] Report sale rate, average proceeds, expired quantity, and cancelled
+- [x] Feature 4: Player performance reports.
+  - [x] Report sale rate, average proceeds, expired quantity, and cancelled
     quantity by item and character.
-  - [ ] Show best and worst personal auction items over configurable time
+  - [x] Show best and worst personal auction items over configurable time
     windows.
-  - [ ] Export player outcome summaries to CSV.
+  - [x] Export player outcome summaries to CSV.
 
 ## Recommendation Features
 

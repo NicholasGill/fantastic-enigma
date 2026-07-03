@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -61,6 +63,7 @@ class AddonImportResult:
     posts: list[PlayerAuctionPost]
     outcomes: list[PlayerAuctionOutcome]
     purchases: list[PlayerAuctionPurchase]
+    malformed_row_count: int = 0
 
 
 def import_saved_variables(path: Path) -> AddonImportResult:
@@ -68,10 +71,11 @@ def import_saved_variables(path: Path) -> AddonImportResult:
     if not isinstance(payload, dict):
         raise ValueError("SavedVariables root must be a table")
 
-    owned_rows = _list_of_dicts(payload.get("owned_snapshots"))
-    mail_rows = _list_of_dicts(payload.get("mail_events"))
+    owned_rows, malformed_owned = _list_of_dicts(payload.get("owned_snapshots"))
+    mail_rows, malformed_mail = _list_of_dicts(payload.get("mail_events"))
+    purchase_rows, malformed_purchases = _list_of_dicts(payload.get("purchase_events"))
     purchase_rows = _dedupe_purchase_rows(
-        _enrich_purchase_rows(_list_of_dicts(payload.get("purchase_events")))
+        _enrich_purchase_rows(purchase_rows)
     )
     return AddonImportResult(
         source_path=path,
@@ -79,6 +83,7 @@ def import_saved_variables(path: Path) -> AddonImportResult:
         posts=[_post_from_row(row) for row in owned_rows],
         outcomes=[_outcome_from_row(row) for row in mail_rows],
         purchases=[_purchase_from_row(row) for row in purchase_rows],
+        malformed_row_count=malformed_owned + malformed_mail + malformed_purchases,
     )
 
 
@@ -217,10 +222,20 @@ def _parse_saved_variables(text: str) -> Any:
     return parser.parse_value()
 
 
-def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
+def row_hash(row_type: str, row: dict[str, Any]) -> str:
+    payload = json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(f"{row_type}:{payload}".encode("utf-8")).hexdigest()
+
+
+def _list_of_dicts(value: Any) -> tuple[list[dict[str, Any]], int]:
     if not isinstance(value, list):
-        return []
-    return [row for row in value if isinstance(row, dict)]
+        return ([], 0)
+    rows = [
+        {**row, "_wat_row_index": index}
+        for index, row in enumerate(value)
+        if isinstance(row, dict)
+    ]
+    return (rows, len(value) - len(rows))
 
 
 def _datetime_from_epoch(value: Any) -> datetime | None:

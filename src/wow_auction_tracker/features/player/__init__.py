@@ -5,6 +5,7 @@ from wow_auction_tracker.features.player.addon_import import (
     PlayerAuctionPurchase,
     import_saved_variables,
     parse_auction_mail_subject,
+    row_hash,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "PlayerAuctionPurchase",
     "import_saved_variables",
     "parse_auction_mail_subject",
+    "row_hash",
 ]

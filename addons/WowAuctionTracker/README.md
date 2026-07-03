@@ -17,6 +17,8 @@ character whose auctions you want to track.
 ## What It Records
 
 - Owned auction snapshots while the auction house is open.
+- Best-effort owned-auction details such as posted unit price, stack size,
+  deposit cost, and auction duration when the WoW API exposes them.
 - Auction-created events followed by owned-auction snapshots.
 - Auction-related mailbox rows when the mailbox is opened or updated.
 - Auction purchase events and purchase intents when the auction house purchase

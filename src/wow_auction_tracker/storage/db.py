@@ -31,6 +31,7 @@ from wow_auction_tracker.features.player import (
     PlayerAuctionOutcome,
     PlayerAuctionPost,
     PlayerAuctionPurchase,
+    row_hash,
 )
 from wow_auction_tracker.features.sellthrough import SellThroughMetric
 
@@ -73,6 +74,9 @@ class AddonImportRecord(Base):
     owned_snapshot_count: Mapped[int] = mapped_column(Integer, nullable=False)
     mail_event_count: Mapped[int] = mapped_column(Integer, nullable=False)
     purchase_event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    inserted_row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped_duplicate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    malformed_row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     posts: Mapped[list[PlayerAuctionPostRecord]] = relationship(back_populates="import_record")
     outcomes: Mapped[list[PlayerAuctionOutcomeRecord]] = relationship(back_populates="import_record")
@@ -274,6 +278,7 @@ class PlayerAuctionPostRecord(Base):
     bid_amount: Mapped[int | None] = mapped_column(Integer)
     time_left_seconds: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str | None] = mapped_column(String(64))
+    row_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     raw_json: Mapped[str] = mapped_column(Text, nullable=False)
 
     import_record: Mapped[AddonImportRecord] = relationship(back_populates="posts")
@@ -293,6 +298,7 @@ class PlayerAuctionOutcomeRecord(Base):
     item_count: Mapped[int | None] = mapped_column(Integer)
     outcome: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     money: Mapped[int | None] = mapped_column(Integer)
+    row_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     raw_json: Mapped[str] = mapped_column(Text, nullable=False)
 
     import_record: Mapped[AddonImportRecord] = relationship(back_populates="outcomes")
@@ -313,9 +319,25 @@ class PlayerAuctionPurchaseRecord(Base):
     quantity: Mapped[int | None] = mapped_column(Integer)
     unit_price: Mapped[int | None] = mapped_column(Integer)
     total_price: Mapped[int | None] = mapped_column(Integer)
+    row_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     raw_json: Mapped[str] = mapped_column(Text, nullable=False)
 
     import_record: Mapped[AddonImportRecord] = relationship(back_populates="purchases")
+
+
+class PlayerAuctionMatchRecord(Base):
+    __tablename__ = "player_auction_matches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    outcome_id: Mapped[int] = mapped_column(ForeignKey("player_auction_outcomes.id"), nullable=False, index=True)
+    post_id: Mapped[int] = mapped_column(ForeignKey("player_auction_posts.id"), nullable=False, index=True)
+    item_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    character: Mapped[str | None] = mapped_column(String(128), index=True)
+    realm: Mapped[str | None] = mapped_column(String(128), index=True)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    confidence: Mapped[int] = mapped_column(Integer, nullable=False)
+    elapsed_seconds: Mapped[int | None] = mapped_column(Integer)
+    matched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 def create_db_engine(database_url: str) -> Engine:
@@ -715,7 +737,7 @@ class AuctionRepository:
                 record.updated_at = now
             session.commit()
 
-    def import_addon_data(self, result: AddonImportResult, *, replace_existing_source: bool = True) -> int:
+    def import_addon_data(self, result: AddonImportResult, *, replace_existing_source: bool = False) -> int:
         with Session(self.engine) as session:
             if replace_existing_source:
                 existing_import_ids = list(
@@ -739,9 +761,32 @@ class AuctionRepository:
                             PlayerAuctionPurchaseRecord.addon_import_id.in_(existing_import_ids)
                         )
                     )
+                    session.execute(delete(PlayerAuctionMatchRecord))
                     session.execute(
                         delete(AddonImportRecord).where(AddonImportRecord.id.in_(existing_import_ids))
                     )
+
+            existing_hashes = {
+                "post": set(
+                    session.scalars(
+                        select(PlayerAuctionPostRecord.row_hash).where(PlayerAuctionPostRecord.row_hash.is_not(None))
+                    ).all()
+                ),
+                "outcome": set(
+                    session.scalars(
+                        select(PlayerAuctionOutcomeRecord.row_hash).where(
+                            PlayerAuctionOutcomeRecord.row_hash.is_not(None)
+                        )
+                    ).all()
+                ),
+                "purchase": set(
+                    session.scalars(
+                        select(PlayerAuctionPurchaseRecord.row_hash).where(
+                            PlayerAuctionPurchaseRecord.row_hash.is_not(None)
+                        )
+                    ).all()
+                ),
+            }
 
             import_record = AddonImportRecord(
                 imported_at=datetime.now(UTC),
@@ -750,11 +795,22 @@ class AuctionRepository:
                 owned_snapshot_count=len(result.posts),
                 mail_event_count=len(result.outcomes),
                 purchase_event_count=len(result.purchases),
+                inserted_row_count=0,
+                skipped_duplicate_count=0,
+                malformed_row_count=result.malformed_row_count,
             )
             session.add(import_record)
             session.flush()
 
+            inserted_row_count = 0
+            skipped_duplicate_count = 0
             for post in result.posts:
+                post_hash = _post_row_hash(post)
+                if post_hash in existing_hashes["post"]:
+                    skipped_duplicate_count += 1
+                    continue
+                existing_hashes["post"].add(post_hash)
+                inserted_row_count += 1
                 session.add(
                     PlayerAuctionPostRecord(
                         addon_import_id=import_record.id,
@@ -771,11 +827,18 @@ class AuctionRepository:
                         bid_amount=post.bid_amount,
                         time_left_seconds=post.time_left_seconds,
                         status=post.status,
+                        row_hash=post_hash,
                         raw_json=json.dumps(post.raw, sort_keys=True),
                     )
                 )
 
             for outcome in result.outcomes:
+                outcome_hash = _outcome_row_hash(outcome)
+                if outcome_hash in existing_hashes["outcome"]:
+                    skipped_duplicate_count += 1
+                    continue
+                existing_hashes["outcome"].add(outcome_hash)
+                inserted_row_count += 1
                 session.add(
                     PlayerAuctionOutcomeRecord(
                         addon_import_id=import_record.id,
@@ -788,11 +851,18 @@ class AuctionRepository:
                         item_count=outcome.item_count,
                         outcome=outcome.outcome,
                         money=outcome.money,
+                        row_hash=outcome_hash,
                         raw_json=json.dumps(outcome.raw, sort_keys=True),
                     )
                 )
 
             for purchase in result.purchases:
+                purchase_hash = _purchase_row_hash(purchase)
+                if purchase_hash in existing_hashes["purchase"]:
+                    skipped_duplicate_count += 1
+                    continue
+                existing_hashes["purchase"].add(purchase_hash)
+                inserted_row_count += 1
                 session.add(
                     PlayerAuctionPurchaseRecord(
                         addon_import_id=import_record.id,
@@ -806,10 +876,15 @@ class AuctionRepository:
                         quantity=purchase.quantity,
                         unit_price=purchase.unit_price,
                         total_price=purchase.total_price,
+                        row_hash=purchase_hash,
                         raw_json=json.dumps(purchase.raw, sort_keys=True),
                     )
                 )
 
+            import_record.inserted_row_count = inserted_row_count
+            import_record.skipped_duplicate_count = skipped_duplicate_count
+            session.flush()
+            _rebuild_player_auction_matches(session)
             session.commit()
             return import_record.id
 
@@ -825,6 +900,141 @@ class AuctionRepository:
             record.name = item.name
             record.market = item.market.value
             record.updated_at = now
+
+
+def _rebuild_player_auction_matches(session: Session) -> None:
+    session.execute(delete(PlayerAuctionMatchRecord))
+    outcomes = session.scalars(
+        select(PlayerAuctionOutcomeRecord)
+        .where(
+            PlayerAuctionOutcomeRecord.outcome.in_(("sold", "expired", "cancelled")),
+            PlayerAuctionOutcomeRecord.item_id.is_not(None),
+        )
+        .order_by(PlayerAuctionOutcomeRecord.observed_at, PlayerAuctionOutcomeRecord.id)
+    ).all()
+    matched_at = datetime.now(UTC)
+    for outcome in outcomes:
+        post = _best_post_for_outcome(session, outcome)
+        if post is None:
+            continue
+        elapsed_seconds = _elapsed_seconds(post.observed_at, outcome.observed_at)
+        session.add(
+            PlayerAuctionMatchRecord(
+                outcome_id=outcome.id,
+                post_id=post.id,
+                item_id=outcome.item_id,
+                character=outcome.character,
+                realm=outcome.realm,
+                outcome=outcome.outcome,
+                confidence=_match_confidence(outcome, post, elapsed_seconds),
+                elapsed_seconds=elapsed_seconds,
+                matched_at=matched_at,
+            )
+        )
+
+
+def _post_row_hash(post: PlayerAuctionPost) -> str:
+    return row_hash(
+        "post",
+        {
+            "raw": post.raw,
+            "observed_at": post.observed_at.isoformat() if post.observed_at else None,
+            "snapshot_id": post.snapshot_id,
+            "character": post.character,
+            "realm": post.realm,
+            "auction_id": post.auction_id,
+            "item_id": post.item_id,
+            "quantity": post.quantity,
+            "unit_price": post.unit_price,
+            "buyout": post.buyout,
+        },
+    )
+
+
+def _outcome_row_hash(outcome: PlayerAuctionOutcome) -> str:
+    return row_hash(
+        "outcome",
+        {
+            "raw": outcome.raw,
+            "observed_at": outcome.observed_at.isoformat() if outcome.observed_at else None,
+            "character": outcome.character,
+            "realm": outcome.realm,
+            "mail_index": outcome.mail_index,
+            "item_id": outcome.item_id,
+            "item_name": outcome.item_name,
+            "item_count": outcome.item_count,
+            "outcome": outcome.outcome,
+            "money": outcome.money,
+        },
+    )
+
+
+def _purchase_row_hash(purchase: PlayerAuctionPurchase) -> str:
+    return row_hash(
+        "purchase",
+        {
+            "raw": purchase.raw,
+            "observed_at": purchase.observed_at.isoformat() if purchase.observed_at else None,
+            "event_type": purchase.event_type,
+            "character": purchase.character,
+            "realm": purchase.realm,
+            "market": purchase.market,
+            "auction_id": purchase.auction_id,
+            "item_id": purchase.item_id,
+            "quantity": purchase.quantity,
+            "unit_price": purchase.unit_price,
+            "total_price": purchase.total_price,
+        },
+    )
+
+
+def _best_post_for_outcome(
+    session: Session,
+    outcome: PlayerAuctionOutcomeRecord,
+) -> PlayerAuctionPostRecord | None:
+    if outcome.item_id is None:
+        return None
+    conditions = [
+        PlayerAuctionPostRecord.item_id == outcome.item_id,
+    ]
+    if outcome.character is not None:
+        conditions.append(PlayerAuctionPostRecord.character == outcome.character)
+    if outcome.realm is not None:
+        conditions.append(PlayerAuctionPostRecord.realm == outcome.realm)
+    if outcome.item_count is not None:
+        conditions.append(PlayerAuctionPostRecord.quantity == outcome.item_count)
+    if outcome.observed_at is not None:
+        conditions.append(PlayerAuctionPostRecord.observed_at <= outcome.observed_at)
+
+    return session.scalars(
+        select(PlayerAuctionPostRecord)
+        .where(*conditions)
+        .order_by(PlayerAuctionPostRecord.observed_at.desc(), PlayerAuctionPostRecord.id.desc())
+        .limit(1)
+    ).first()
+
+
+def _elapsed_seconds(started_at: datetime | None, finished_at: datetime | None) -> int | None:
+    if started_at is None or finished_at is None:
+        return None
+    return max(0, round((finished_at - started_at).total_seconds()))
+
+
+def _match_confidence(
+    outcome: PlayerAuctionOutcomeRecord,
+    post: PlayerAuctionPostRecord,
+    elapsed_seconds: int | None,
+) -> int:
+    confidence = 45
+    if outcome.character is not None and outcome.character == post.character:
+        confidence += 15
+    if outcome.realm is not None and outcome.realm == post.realm:
+        confidence += 10
+    if outcome.item_count is not None and outcome.item_count == post.quantity:
+        confidence += 20
+    if elapsed_seconds is not None and elapsed_seconds <= 7 * 24 * 60 * 60:
+        confidence += 10
+    return min(confidence, 100)
 
 
 def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
@@ -982,7 +1192,10 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
                 addon_version integer,
                 owned_snapshot_count integer not null,
                 mail_event_count integer not null,
-                purchase_event_count integer not null default 0
+                purchase_event_count integer not null default 0,
+                inserted_row_count integer not null default 0,
+                skipped_duplicate_count integer not null default 0,
+                malformed_row_count integer not null default 0
             )
             """
         )
@@ -991,6 +1204,9 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
             "addon_imports",
             {
                 "purchase_event_count": "integer not null default 0",
+                "inserted_row_count": "integer not null default 0",
+                "skipped_duplicate_count": "integer not null default 0",
+                "malformed_row_count": "integer not null default 0",
             },
         )
         connection.exec_driver_sql(
@@ -1011,6 +1227,7 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
                 bid_amount integer,
                 time_left_seconds integer,
                 status varchar(64),
+                row_hash varchar(64),
                 raw_json text not null,
                 foreign key(addon_import_id) references addon_imports (id)
             )
@@ -1030,6 +1247,7 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
                 item_count integer,
                 outcome varchar(32) not null,
                 money integer,
+                row_hash varchar(64),
                 raw_json text not null,
                 foreign key(addon_import_id) references addon_imports (id)
             )
@@ -1050,8 +1268,30 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
                 quantity integer,
                 unit_price integer,
                 total_price integer,
+                row_hash varchar(64),
                 raw_json text not null,
                 foreign key(addon_import_id) references addon_imports (id)
+            )
+            """
+        )
+        _ensure_sqlite_columns(connection, "player_auction_posts", {"row_hash": "varchar(64)"})
+        _ensure_sqlite_columns(connection, "player_auction_outcomes", {"row_hash": "varchar(64)"})
+        _ensure_sqlite_columns(connection, "player_auction_purchases", {"row_hash": "varchar(64)"})
+        connection.exec_driver_sql(
+            """
+            create table if not exists player_auction_matches (
+                id integer primary key,
+                outcome_id integer not null,
+                post_id integer not null,
+                item_id integer,
+                character varchar(128),
+                realm varchar(128),
+                outcome varchar(32) not null,
+                confidence integer not null,
+                elapsed_seconds integer,
+                matched_at datetime not null,
+                foreign key(outcome_id) references player_auction_outcomes (id),
+                foreign key(post_id) references player_auction_posts (id)
             )
             """
         )
@@ -1063,12 +1303,14 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
             ("player_auction_posts", "realm"),
             ("player_auction_posts", "auction_id"),
             ("player_auction_posts", "item_id"),
+            ("player_auction_posts", "row_hash"),
             ("player_auction_outcomes", "addon_import_id"),
             ("player_auction_outcomes", "observed_at"),
             ("player_auction_outcomes", "character"),
             ("player_auction_outcomes", "realm"),
             ("player_auction_outcomes", "item_id"),
             ("player_auction_outcomes", "outcome"),
+            ("player_auction_outcomes", "row_hash"),
             ("player_auction_purchases", "addon_import_id"),
             ("player_auction_purchases", "observed_at"),
             ("player_auction_purchases", "event_type"),
@@ -1076,6 +1318,13 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
             ("player_auction_purchases", "realm"),
             ("player_auction_purchases", "auction_id"),
             ("player_auction_purchases", "item_id"),
+            ("player_auction_purchases", "row_hash"),
+            ("player_auction_matches", "outcome_id"),
+            ("player_auction_matches", "post_id"),
+            ("player_auction_matches", "item_id"),
+            ("player_auction_matches", "character"),
+            ("player_auction_matches", "realm"),
+            ("player_auction_matches", "outcome"),
         ):
             connection.exec_driver_sql(f"create index if not exists ix_{table}_{column} on {table} ({column})")
 

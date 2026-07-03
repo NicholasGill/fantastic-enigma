@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -176,13 +177,29 @@ class DashboardDataStore:
         result = import_saved_variables(path)
         repository = AuctionRepository(create_db_engine(self.database_url))
         import_id = repository.import_addon_data(result)
+        with self._connect() as connection:
+            import_row = connection.execute(
+                """
+                select inserted_row_count, skipped_duplicate_count, malformed_row_count
+                from addon_imports
+                where id = ?
+                """,
+                (import_id,),
+            ).fetchone()
         return {
             "import_id": import_id,
             "source_path": str(path),
             "owned_snapshot_count": len(result.posts),
             "mail_event_count": len(result.outcomes),
             "purchase_event_count": len(result.purchases),
+            "inserted_row_count": int(import_row["inserted_row_count"]) if import_row else 0,
+            "skipped_duplicate_count": int(import_row["skipped_duplicate_count"]) if import_row else 0,
+            "malformed_row_count": int(import_row["malformed_row_count"]) if import_row else result.malformed_row_count,
         }
+
+    def player_performance(self, *, window_days: int | None = None) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            return _player_performance(connection, window_days=window_days)
 
     def _latest_addon_source_path(self) -> Path | None:
         with self._connect() as connection:
@@ -395,7 +412,16 @@ class DashboardDataStore:
     def _player_activity(connection: sqlite3.Connection) -> dict[str, Any]:
         latest_import = connection.execute(
             """
-            select id, imported_at, source_path, owned_snapshot_count, mail_event_count, purchase_event_count
+            select
+                id,
+                imported_at,
+                source_path,
+                owned_snapshot_count,
+                mail_event_count,
+                purchase_event_count,
+                inserted_row_count,
+                skipped_duplicate_count,
+                malformed_row_count
             from addon_imports
             order by id desc
             limit 1
@@ -514,6 +540,7 @@ class DashboardDataStore:
                 (select coalesce(sum(total_price), 0) from player_auction_purchases
                     where event_type in ('auction_purchase_completed', 'commodity_purchase_succeeded')
                 ) as purchase_money,
+                (select count(*) from player_auction_matches) as matched_outcome_count,
                 (select count(*) from buy_opportunity_observations) as buy_opportunity_count
             """
         ).fetchone()
@@ -524,6 +551,7 @@ class DashboardDataStore:
             "outcomes": _enriched_player_outcomes(connection, outcomes),
             "purchases": [dict(row) for row in purchases],
             "buy_opportunities": [dict(row) for row in buy_opportunities],
+            "performance": _player_performance(connection),
         }
 
 
@@ -629,6 +657,53 @@ def _enriched_player_outcomes(
                 outcome["item_id"] = name_to_item_id.get(subject_key)
         outcomes.append(outcome)
     return outcomes
+
+
+def _player_performance(connection: sqlite3.Connection, *, window_days: int | None = None) -> list[dict[str, Any]]:
+    where_clause = ""
+    params: tuple[str, ...] = ()
+    if window_days is not None:
+        cutoff = datetime.now(UTC) - timedelta(days=window_days)
+        where_clause = "where o.observed_at >= ?"
+        params = (cutoff.isoformat(sep=" "),)
+    rows = connection.execute(
+        f"""
+        select
+            coalesce(o.item_id, m.item_id) as item_id,
+            coalesce(md.name, o.item_name, t.name, 'Item ' || coalesce(o.item_id, m.item_id)) as name,
+            o.character,
+            o.realm,
+            count(*) as outcome_count,
+            sum(case when o.outcome = 'sold' then 1 else 0 end) as sold_count,
+            sum(case when o.outcome = 'expired' then 1 else 0 end) as expired_count,
+            sum(case when o.outcome = 'cancelled' then 1 else 0 end) as cancelled_count,
+            coalesce(sum(case when o.outcome = 'sold' then o.item_count else 0 end), 0) as sold_quantity,
+            coalesce(sum(case when o.outcome = 'expired' then o.item_count else 0 end), 0) as expired_quantity,
+            coalesce(sum(case when o.outcome = 'cancelled' then o.item_count else 0 end), 0) as cancelled_quantity,
+            coalesce(sum(case when o.outcome = 'sold' then o.money else 0 end), 0) as proceeds,
+            avg(case when o.outcome = 'sold' then o.money end) as average_proceeds,
+            avg(case when m.outcome = 'sold' then m.elapsed_seconds end) as average_time_to_sale_seconds,
+            avg(case when m.outcome = 'expired' then m.elapsed_seconds end) as average_time_to_expiry_seconds,
+            avg(m.confidence) as average_match_confidence
+        from player_auction_outcomes o
+        left join player_auction_matches m on m.outcome_id = o.id
+        left join item_metadata md on md.item_id = coalesce(o.item_id, m.item_id)
+        left join tracked_items t on t.item_id = coalesce(o.item_id, m.item_id)
+        {where_clause}
+        group by coalesce(o.item_id, m.item_id), o.character, o.realm
+        order by proceeds desc, sold_count desc, outcome_count desc
+        limit 50
+        """,
+        params,
+    ).fetchall()
+    performance = [dict(row) for row in rows]
+    for row in performance:
+        outcome_count = int(row.get("outcome_count") or 0)
+        row["sale_rate_bps"] = round((int(row.get("sold_count") or 0) / outcome_count) * 10000) if outcome_count else 0
+        for key in ("average_proceeds", "average_time_to_sale_seconds", "average_time_to_expiry_seconds", "average_match_confidence"):
+            if row.get(key) is not None:
+                row[key] = round(float(row[key]))
+    return performance
 
 
 def _item_ids_by_name_and_sold_quantity(connection: sqlite3.Connection) -> dict[tuple[str, int], int]:
@@ -1611,7 +1686,7 @@ DASHBOARD_HTML = """<!doctype html>
         if (!response.ok) {
           throw new Error(payload.error || 'Import failed');
         }
-        els.refreshStatus.textContent = `Imported ${integer(payload.owned_snapshot_count)} listings, ${integer(payload.mail_event_count)} mail rows, ${integer(payload.purchase_event_count)} purchase rows`;
+        els.refreshStatus.textContent = `Imported ${integer(payload.inserted_row_count)} new rows, skipped ${integer(payload.skipped_duplicate_count)} duplicates, ${integer(payload.malformed_row_count)} malformed`;
         await loadOverview();
       } catch (error) {
         els.refreshStatus.textContent = error.message || 'Import failed';

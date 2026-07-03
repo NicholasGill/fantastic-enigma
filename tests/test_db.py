@@ -18,6 +18,8 @@ from wow_auction_tracker.storage import (
     ItemMetadataRecord,
     ItemSummaryRecord,
     ListingObservationRecord,
+    AddonImportRecord,
+    PlayerAuctionMatchRecord,
     PlayerAuctionOutcomeRecord,
     PlayerAuctionPostRecord,
     PlayerAuctionPurchaseRecord,
@@ -421,14 +423,24 @@ def test_repository_imports_player_addon_rows(tmp_path) -> None:
 
     second_import_id = repository.import_addon_data(import_saved_variables(saved_variables))
     with Session(engine) as session:
+        imports = session.scalars(select(AddonImportRecord).order_by(AddonImportRecord.id)).all()
         posts = session.scalars(select(PlayerAuctionPostRecord)).all()
         outcomes = session.scalars(select(PlayerAuctionOutcomeRecord)).all()
         purchases = session.scalars(select(PlayerAuctionPurchaseRecord)).all()
+        matches = session.scalars(select(PlayerAuctionMatchRecord)).all()
 
-    assert second_import_id == 1
+    assert second_import_id == 2
+    assert imports[0].inserted_row_count == 3
+    assert imports[0].skipped_duplicate_count == 0
+    assert imports[1].inserted_row_count == 0
+    assert imports[1].skipped_duplicate_count == 3
     assert len(posts) == 1
     assert len(outcomes) == 1
     assert len(purchases) == 1
+    assert len(matches) == 1
+    assert matches[0].outcome == "sold"
+    assert matches[0].elapsed_seconds == 300
+    assert matches[0].confidence == 100
 
 
 def test_import_addon_dedupes_purchase_events_and_skips_empty_completion(tmp_path) -> None:

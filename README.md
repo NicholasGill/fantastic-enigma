@@ -109,6 +109,9 @@ file:
 uv run wow-auctions import-addon --saved-variables "/path/to/WowAuctionTracker.lua"
 ```
 
+Repeated imports are row-deduped. The command reports inserted rows, skipped
+duplicates, and malformed rows.
+
 Print the latest stored item summaries:
 
 ```bash
@@ -121,6 +124,13 @@ Print snapshot history for one item:
 uv run wow-auctions report item --item-id 210930
 ```
 
+Show personal auction performance from imported addon rows:
+
+```bash
+uv run wow-auctions report player --limit 10
+uv run wow-auctions report player --days 30 --limit 10
+```
+
 Export stored data to CSV:
 
 ```bash
@@ -128,6 +138,7 @@ uv run wow-auctions export latest --output latest.csv
 uv run wow-auctions export item --item-id 210930 --output item-history.csv
 uv run wow-auctions export recommendations --limit 10
 uv run wow-auctions export crafts --output craft-signals.csv
+uv run wow-auctions export player-performance --days 30 --output player-performance.csv
 ```
 
 Recommendations are conservative estimates based on current price versus recent
@@ -175,8 +186,8 @@ World of Warcraft/_retail_/WTF/Account/<ACCOUNT>/SavedVariables/WowAuctionTracke
 
 SavedVariables are written after `/reload`, logout, or game exit. Import them
 with `uv run wow-auctions import-addon --saved-variables ...` to store owned
-auction posts, mailbox sale/expiry/cancel outcomes, and the raw addon rows in
-SQLite.
+auction posts, mailbox sale/expiry/cancel outcomes, purchase rows, row hashes,
+dedupe counts, match confidence, and the raw addon rows in SQLite.
 
 ## Project Layout
 

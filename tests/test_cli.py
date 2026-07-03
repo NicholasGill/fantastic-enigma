@@ -349,6 +349,75 @@ def test_import_addon_command_stores_saved_variables(capsys: pytest.CaptureFixtu
 
     assert exit_code == 0
     assert "1 owned auction rows, 1 mail rows, 1 purchase rows" in captured
+    assert "3 inserted" in captured
+
+
+def test_player_report_and_export_commands_use_imported_outcomes(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    saved_variables = tmp_path / "WowAuctionTracker.lua"
+    saved_variables.write_text(
+        """
+        WowAuctionTrackerDB = {
+          ["version"] = 1,
+          ["owned_snapshots"] = {
+            {
+              ["observed_at"] = 1710000000,
+              ["snapshot_id"] = "Alice-1710000000",
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["auction_id"] = 42,
+              ["item_id"] = 210930,
+              ["quantity"] = 5,
+              ["unit_price"] = 10000,
+            },
+          },
+          ["mail_events"] = {
+            {
+              ["observed_at"] = 1710000300,
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["mail_index"] = 1,
+              ["outcome"] = "sold",
+              ["money"] = 45000,
+              ["first_item_name"] = "Bismuth",
+              ["first_item_id"] = 210930,
+              ["first_item_count"] = 5,
+            },
+          },
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    assert main([
+        "--database-url",
+        f"sqlite:///{db_path}",
+        "import-addon",
+        "--saved-variables",
+        str(saved_variables),
+    ]) == 0
+    capsys.readouterr()
+
+    assert main(["--database-url", f"sqlite:///{db_path}", "report", "player", "--limit", "1"]) == 0
+    report_output = capsys.readouterr().out
+    assert "Bismuth" in report_output
+    assert "Alice" in report_output
+
+    csv_path = tmp_path / "player-performance.csv"
+    assert main([
+        "--database-url",
+        f"sqlite:///{db_path}",
+        "export",
+        "player-performance",
+        "--output",
+        str(csv_path),
+    ]) == 0
+    rows = list(csv.DictReader(csv_path.open(newline="", encoding="utf-8")))
+    assert rows[0]["name"] == "Bismuth"
+    assert rows[0]["sold_count"] == "1"
 
 
 def _store_craft_signal(db_path: Path) -> None:

@@ -113,6 +113,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Number of craft signals to show. Defaults to 10.",
     )
+    report_player_parser = report_subparsers.add_parser("player", help="Show personal auction performance.")
+    report_player_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=10,
+        help="Number of player performance rows to show. Defaults to 10.",
+    )
+    report_player_parser.add_argument(
+        "--days",
+        type=_positive_int,
+        default=None,
+        help="Only include outcomes from the last N days.",
+    )
     export_parser = subparsers.add_parser("export", help="Export stored data to CSV.")
     export_subparsers = export_parser.add_subparsers(dest="export_command", required=True)
     export_latest_parser = export_subparsers.add_parser("latest", help="Export the latest item summaries to CSV.")
@@ -157,6 +170,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Write CSV to a file instead of stdout.",
+    )
+    export_player_parser = export_subparsers.add_parser(
+        "player-performance",
+        help="Export personal auction performance to CSV.",
+    )
+    export_player_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Write CSV to a file instead of stdout.",
+    )
+    export_player_parser.add_argument(
+        "--days",
+        type=_positive_int,
+        default=None,
+        help="Only include outcomes from the last N days.",
     )
     import_parser = subparsers.add_parser("import-addon", help="Import companion addon SavedVariables.")
     import_parser.add_argument(
@@ -240,6 +269,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.report_command == "crafts":
             _print_craft_report(store.overview(), args.limit)
             return 0
+        if args.report_command == "player":
+            _print_player_report(store.player_performance(window_days=args.days), args.limit)
+            return 0
         raise ValueError(f"unsupported report command {args.report_command}")
 
     if args.command == "export":
@@ -276,16 +308,27 @@ def main(argv: list[str] | None = None) -> int:
                 fieldnames=_CRAFT_EXPORT_FIELDNAMES,
             )
             return 0
+        if args.export_command == "player-performance":
+            _write_csv(
+                store.player_performance(window_days=args.days),
+                args.output,
+                fieldnames=_PLAYER_PERFORMANCE_EXPORT_FIELDNAMES,
+            )
+            return 0
         raise ValueError(f"unsupported export command {args.export_command}")
 
     if args.command == "import-addon":
         repository = AuctionRepository(engine)
         result = import_saved_variables(args.saved_variables)
         import_id = repository.import_addon_data(result)
+        import_counts = DashboardDataStore(args.database_url).overview()["player_activity"].get("latest_import", {})
         print(
             f"Imported addon data {import_id}: "
             f"{len(result.posts)} owned auction rows, {len(result.outcomes)} mail rows, "
-            f"{len(result.purchases)} purchase rows"
+            f"{len(result.purchases)} purchase rows, "
+            f"{import_counts.get('inserted_row_count', 0)} inserted, "
+            f"{import_counts.get('skipped_duplicate_count', 0)} skipped duplicates, "
+            f"{import_counts.get('malformed_row_count', 0)} malformed"
         )
         return 0
 
@@ -499,6 +542,28 @@ def _print_craft_report(overview: dict[str, object], limit: int) -> None:
         )
 
 
+def _print_player_report(rows: list[dict[str, object]], limit: int) -> None:
+    if not isinstance(rows, list) or not rows:
+        print("No player auction performance available")
+        return
+
+    print("Item ID  Name                 Character     Sold  Expired  Cancelled  Sale %  Avg Sale  Avg Sale Time")
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        print(
+            f"{str(row.get('item_id') or '-'):<7}  "
+            f"{str(row.get('name') or 'Unknown')[:20]:<20} "
+            f"{str(row.get('character') or '-')[:12]:<12} "
+            f"{int(row.get('sold_count') or 0):>4}  "
+            f"{int(row.get('expired_count') or 0):>7}  "
+            f"{int(row.get('cancelled_count') or 0):>9}  "
+            f"{(int(row.get('sale_rate_bps') or 0) / 100):>5.1f}%  "
+            f"{_format_copper(_optional_export_int(row.get('average_proceeds'))):>8}  "
+            f"{_format_duration(_optional_export_int(row.get('average_time_to_sale_seconds'))):>13}"
+        )
+
+
 _LATEST_EXPORT_FIELDNAMES = [
     "item_id",
     "name",
@@ -611,6 +676,25 @@ _CRAFT_EXPORT_FIELDNAMES = [
     "max_craft_quantity",
     "confidence",
     "reasons",
+]
+_PLAYER_PERFORMANCE_EXPORT_FIELDNAMES = [
+    "item_id",
+    "name",
+    "character",
+    "realm",
+    "outcome_count",
+    "sold_count",
+    "expired_count",
+    "cancelled_count",
+    "sold_quantity",
+    "expired_quantity",
+    "cancelled_quantity",
+    "sale_rate_bps",
+    "proceeds",
+    "average_proceeds",
+    "average_time_to_sale_seconds",
+    "average_time_to_expiry_seconds",
+    "average_match_confidence",
 ]
 
 
@@ -801,6 +885,14 @@ def _craft_rows_for_export(overview: dict[str, object]) -> list[dict[str, object
     return export_rows
 
 
+def _player_performance_rows_for_export(overview: dict[str, object]) -> list[dict[str, object]]:
+    activity = overview.get("player_activity", {})
+    rows = activity.get("performance", []) if isinstance(activity, dict) else []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
 def _recommendation_for_item(overview: dict[str, object], item_id: int) -> dict[str, object] | None:
     recommendations = overview.get("recommendations", [])
     if not isinstance(recommendations, list):
@@ -836,6 +928,22 @@ def _format_copper(value: int | None) -> str:
     if value is None:
         return "-"
     return f"{value / 10000:.2f}g"
+
+
+def _format_duration(seconds: int | None) -> str:
+    if seconds is None:
+        return "-"
+    if seconds < 3600:
+        return f"{round(seconds / 60)}m"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
+
+
+def _optional_export_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
 
 
 if __name__ == "__main__":
