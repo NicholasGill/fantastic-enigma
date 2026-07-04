@@ -16,11 +16,14 @@ character whose auctions you want to track.
 
 ## What It Records
 
-- Owned auction snapshots while the auction house is open.
+- Event-driven owned auction snapshots when the auction house opens, owned
+  auctions update, auctions are created, or the auction house closes. Repeated
+  identical owned-auction rows are skipped during the same login session.
 - Best-effort owned-auction details such as posted unit price, stack size,
   deposit cost, and auction duration when the WoW API exposes them.
 - Auction-created events followed by owned-auction snapshots.
-- Auction-related mailbox rows when the mailbox is opened or updated.
+- Auction-related mailbox rows when the mailbox is opened or updated. Repeated
+  identical mailbox rows are skipped during the same login session.
 - Auction purchase events and purchase intents when the auction house purchase
   APIs fire. Commodity purchases include a best-effort price estimate from the
   visible commodity search results when WoW does not include price fields in the
@@ -37,8 +40,8 @@ WoW writes SavedVariables on `/reload`, logout, or game exit.
 ## Commands
 
 - `/wat status`: print current captured row counts.
-- `/wat scan`: query owned auctions and record a snapshot.
-- `/wat mail`: scan visible inbox rows for auction-related mail.
+- `/wat scan`: query owned auctions and force-record the visible snapshot.
+- `/wat mail`: force-scan visible inbox rows for auction-related mail.
 
 ## Notes
 

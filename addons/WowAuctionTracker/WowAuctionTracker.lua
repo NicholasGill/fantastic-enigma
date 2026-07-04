@@ -2,9 +2,15 @@ local ADDON_NAME = ...
 local WAT = CreateFrame("Frame")
 
 local MAX_EVENTS = 5000
-local DATA_VERSION = 3
+local DATA_VERSION = 4
 local purchaseHooksInstalled = false
 local pendingCommodityPurchase = nil
+local ownedSnapshotScheduled = false
+local pendingOwnedSnapshotReason = nil
+local pendingOwnedSnapshotForce = false
+local mailScanScheduled = false
+local pendingMailScanReason = nil
+local pendingMailScanForce = false
 
 local function Now()
   return time()
@@ -26,6 +32,7 @@ local function EnsureDB()
   WowAuctionTrackerDB.mail_events = WowAuctionTrackerDB.mail_events or {}
   WowAuctionTrackerDB.purchase_events = WowAuctionTrackerDB.purchase_events or {}
   WowAuctionTrackerDB.session = WowAuctionTrackerDB.session or {}
+  WowAuctionTrackerDB.session.seen = WowAuctionTrackerDB.session.seen or {}
 end
 
 local function Append(tableName, row)
@@ -45,6 +52,39 @@ local function SimpleValue(value)
     return value
   end
   return tostring(value)
+end
+
+local function KeyPart(value)
+  if value == nil then
+    return ""
+  end
+  return string.gsub(tostring(value), "\31", " ")
+end
+
+local function BuildKey(...)
+  local parts = {}
+  for index = 1, select("#", ...) do
+    parts[index] = KeyPart(select(index, ...))
+  end
+  return table.concat(parts, "\31")
+end
+
+local function SeenNamespace(namespace)
+  EnsureDB()
+  WowAuctionTrackerDB.session.seen[namespace] = WowAuctionTrackerDB.session.seen[namespace] or {}
+  return WowAuctionTrackerDB.session.seen[namespace]
+end
+
+local function AppendUnique(tableName, row, namespace, key)
+  if key ~= nil then
+    local seen = SeenNamespace(namespace)
+    if seen[key] then
+      return false
+    end
+    seen[key] = true
+  end
+  Append(tableName, row)
+  return true
 end
 
 local function RecordPurchaseEvent(eventType, row)
@@ -193,7 +233,22 @@ local function ItemKeyToFields(itemKey)
   return itemKey.itemID, itemKey.itemLevel, itemKey.itemSuffix, itemKey.battlePetSpeciesID
 end
 
-local function RecordOwnedAuctionSnapshot(reason)
+local function OwnedAuctionRowKey(row)
+  return BuildKey(
+    row.character,
+    row.realm,
+    row.auction_id,
+    row.item_id,
+    row.quantity,
+    row.unit_price,
+    row.buyout,
+    row.bid_amount,
+    row.time_left_seconds,
+    row.status
+  )
+end
+
+local function RecordOwnedAuctionSnapshot(reason, force)
   EnsureDB()
   if C_AuctionHouse == nil or C_AuctionHouse.GetNumOwnedAuctions == nil then
     return
@@ -202,13 +257,14 @@ local function RecordOwnedAuctionSnapshot(reason)
   local character, realm = PlayerName()
   local snapshotId = string.format("%s-%d", character or "unknown", Now())
   local count = C_AuctionHouse.GetNumOwnedAuctions()
+  local recordedCount = 0
 
   for index = 1, count do
     local info = C_AuctionHouse.GetOwnedAuctionInfo(index)
     if info ~= nil then
       local unitPrice, buyoutAmount = MoneyFromOwnedAuction(info)
       local itemID, itemLevel, itemSuffix, battlePetSpeciesID = ItemKeyToFields(info.itemKey)
-      Append("owned_snapshots", {
+      local row = {
         snapshot_id = snapshotId,
         reason = reason,
         character = character,
@@ -230,7 +286,13 @@ local function RecordOwnedAuctionSnapshot(reason)
         stack_size = info.stackSize or info.quantity,
         time_left_seconds = info.timeLeftSeconds,
         status = info.status,
-      })
+      }
+      if force then
+        Append("owned_snapshots", row)
+        recordedCount = recordedCount + 1
+      elseif AppendUnique("owned_snapshots", row, "owned_snapshots", OwnedAuctionRowKey(row)) then
+        recordedCount = recordedCount + 1
+      end
     end
   end
 
@@ -241,12 +303,41 @@ local function RecordOwnedAuctionSnapshot(reason)
     realm = realm,
     snapshot_id = snapshotId,
     owned_auction_count = count,
+    recorded_owned_auction_count = recordedCount,
   })
 end
 
 local function QueryOwnedAuctions()
   if C_AuctionHouse ~= nil and C_AuctionHouse.QueryOwnedAuctions ~= nil then
     C_AuctionHouse.QueryOwnedAuctions({{ sortOrder = 1, reverseSort = false }})
+  end
+end
+
+local function ScheduleOwnedAuctionSnapshot(reason, delaySeconds, force)
+  if reason ~= "auction_house_closed" then
+    QueryOwnedAuctions()
+  end
+  pendingOwnedSnapshotReason = reason or pendingOwnedSnapshotReason
+  pendingOwnedSnapshotForce = pendingOwnedSnapshotForce or force == true
+
+  if ownedSnapshotScheduled then
+    return
+  end
+
+  ownedSnapshotScheduled = true
+  local function capture()
+    local captureReason = pendingOwnedSnapshotReason or reason
+    local captureForce = pendingOwnedSnapshotForce
+    ownedSnapshotScheduled = false
+    pendingOwnedSnapshotReason = nil
+    pendingOwnedSnapshotForce = false
+    RecordOwnedAuctionSnapshot(captureReason, captureForce)
+  end
+
+  if C_Timer ~= nil and C_Timer.After ~= nil then
+    C_Timer.After(delaySeconds or 1, capture)
+  else
+    capture()
   end
 end
 
@@ -277,7 +368,23 @@ local function OutcomeFromMail(subject, money, itemCount)
   return "unknown"
 end
 
-local function RecordAuctionMail()
+local function MailRowKey(row)
+  return BuildKey(
+    row.character,
+    row.realm,
+    row.sender,
+    row.subject,
+    row.outcome,
+    row.money,
+    row.cod_amount,
+    row.item_count,
+    row.first_item_name,
+    row.first_item_id,
+    row.first_item_count
+  )
+end
+
+local function RecordAuctionMail(reason, force)
   EnsureDB()
   if GetInboxNumItems == nil then
     return
@@ -285,6 +392,7 @@ local function RecordAuctionMail()
 
   local character, realm = PlayerName()
   local numItems = GetInboxNumItems()
+  local recordedCount = 0
 
   for index = 1, numItems do
     local _, _, sender, subject, money, codAmount, daysLeft, itemCount, wasRead = GetInboxHeaderInfo(index)
@@ -294,7 +402,8 @@ local function RecordAuctionMail()
         firstItemName, firstItemID, _, firstItemCount = GetInboxItem(index, 1)
       end
 
-      Append("mail_events", {
+      local row = {
+        reason = reason,
         character = character,
         realm = realm,
         mail_index = index,
@@ -309,8 +418,48 @@ local function RecordAuctionMail()
         first_item_name = firstItemName,
         first_item_id = firstItemID,
         first_item_count = firstItemCount,
-      })
+      }
+      if force then
+        Append("mail_events", row)
+        recordedCount = recordedCount + 1
+      elseif AppendUnique("mail_events", row, "mail_events", MailRowKey(row)) then
+        recordedCount = recordedCount + 1
+      end
     end
+  end
+
+  Append("events", {
+    event_type = "mail_scan",
+    reason = reason,
+    character = character,
+    realm = realm,
+    inbox_count = numItems,
+    recorded_mail_count = recordedCount,
+  })
+end
+
+local function ScheduleAuctionMailScan(reason, delaySeconds, force)
+  pendingMailScanReason = reason or pendingMailScanReason
+  pendingMailScanForce = pendingMailScanForce or force == true
+
+  if mailScanScheduled then
+    return
+  end
+
+  mailScanScheduled = true
+  local function scan()
+    local scanReason = pendingMailScanReason or reason
+    local scanForce = pendingMailScanForce
+    mailScanScheduled = false
+    pendingMailScanReason = nil
+    pendingMailScanForce = false
+    RecordAuctionMail(scanReason, scanForce)
+  end
+
+  if C_Timer ~= nil and C_Timer.After ~= nil then
+    C_Timer.After(delaySeconds or 0.5, scan)
+  else
+    scan()
   end
 end
 
@@ -336,13 +485,16 @@ SLASH_WOWAUCTIONTRACKER2 = "/wowauctiontracker"
 SlashCmdList.WOWAUCTIONTRACKER = function(command)
   command = string.lower(command or "")
   if command == "scan" then
-    QueryOwnedAuctions()
-    C_Timer.After(1, function()
-      RecordOwnedAuctionSnapshot("slash_scan")
+    ScheduleOwnedAuctionSnapshot("slash_scan", 1, true)
+    if C_Timer ~= nil and C_Timer.After ~= nil then
+      C_Timer.After(1.1, function()
+        PrintStatus()
+      end)
+    else
       PrintStatus()
-    end)
+    end
   elseif command == "mail" then
-    RecordAuctionMail()
+    RecordAuctionMail("slash_mail", true)
     PrintStatus()
   elseif command == "status" or command == "" then
     PrintStatus()
@@ -374,32 +526,24 @@ WAT:SetScript("OnEvent", function(_, event, ...)
     WowAuctionTrackerDB.session.character = character
     WowAuctionTrackerDB.session.realm = realm
     WowAuctionTrackerDB.session.started_at = Now()
+    WowAuctionTrackerDB.session.seen = {}
   elseif event == "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" then
     local interactionType = ...
     if Enum ~= nil and Enum.PlayerInteractionType ~= nil and interactionType ~= Enum.PlayerInteractionType.Auctioneer then
       return
     end
-    QueryOwnedAuctions()
-    C_Timer.After(1, function()
-      RecordOwnedAuctionSnapshot("auction_house_show")
-    end)
+    ScheduleOwnedAuctionSnapshot("auction_house_show", 1, false)
   elseif event == "AUCTION_HOUSE_SHOW" then
-    QueryOwnedAuctions()
-    C_Timer.After(1, function()
-      RecordOwnedAuctionSnapshot("auction_house_show")
-    end)
+    ScheduleOwnedAuctionSnapshot("auction_house_show", 1, false)
   elseif event == "OWNED_AUCTIONS_UPDATED" then
-    RecordOwnedAuctionSnapshot("owned_auctions_updated")
+    ScheduleOwnedAuctionSnapshot("owned_auctions_updated", 0.5, false)
   elseif event == "AUCTION_HOUSE_AUCTION_CREATED" then
     Append("events", {
       event_type = "auction_created",
     })
-    QueryOwnedAuctions()
-    C_Timer.After(1, function()
-      RecordOwnedAuctionSnapshot("auction_created")
-    end)
+    ScheduleOwnedAuctionSnapshot("auction_created", 1, false)
   elseif event == "AUCTION_HOUSE_CLOSED" then
-    RecordOwnedAuctionSnapshot("auction_house_closed")
+    ScheduleOwnedAuctionSnapshot("auction_house_closed", 0, false)
   elseif event == "AUCTION_HOUSE_PURCHASE_COMPLETED" then
     local auctionID, itemID, quantity, totalPrice, unitPrice = ...
     if auctionID ~= nil and auctionID ~= 0 or itemID ~= nil or totalPrice ~= nil or unitPrice ~= nil then
@@ -460,7 +604,9 @@ WAT:SetScript("OnEvent", function(_, event, ...)
       event_arg2 = SimpleValue(quantity),
     })
     pendingCommodityPurchase = nil
-  elseif event == "MAIL_SHOW" or event == "MAIL_INBOX_UPDATE" then
-    RecordAuctionMail()
+  elseif event == "MAIL_SHOW" then
+    ScheduleAuctionMailScan("mail_show", 0.5, false)
+  elseif event == "MAIL_INBOX_UPDATE" then
+    ScheduleAuctionMailScan("mail_inbox_update", 0.5, false)
   end
 end)
