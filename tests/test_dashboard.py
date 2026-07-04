@@ -733,6 +733,68 @@ def test_dashboard_profit_loss_excludes_untracked_addon_items(tmp_path: Path) ->
     assert [item["item_id"] for item in activity["profit_loss"]["items"]] == [219946]
 
 
+def test_dashboard_profit_loss_uses_current_config_ids_over_stale_tracked_items(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    repository.start_fetch_run(
+        TrackerConfig.model_validate(
+            {
+                "items": [
+                    {"id": 219946, "name": "Storm Dust", "market": "commodity"},
+                    {"id": 210810, "name": "Arathor's Spear", "market": "commodity"},
+                ]
+            }
+        )
+    )
+    repository.import_addon_data(
+        AddonImportResult(
+            source_path=tmp_path / "WowAuctionTracker.lua",
+            addon_version=1,
+            posts=[],
+            outcomes=[],
+            purchases=[
+                PlayerAuctionPurchase(
+                    observed_at=datetime(2026, 7, 1, 5, 20, tzinfo=UTC),
+                    event_type="commodity_purchase_succeeded",
+                    character="Arces",
+                    realm="Dalaran",
+                    market="commodity",
+                    auction_id=None,
+                    item_id=219946,
+                    quantity=100,
+                    unit_price=80,
+                    total_price=8000,
+                    raw={"event_type": "commodity_purchase_succeeded"},
+                ),
+                PlayerAuctionPurchase(
+                    observed_at=datetime(2026, 7, 1, 5, 21, tzinfo=UTC),
+                    event_type="commodity_purchase_succeeded",
+                    character="Arces",
+                    realm="Dalaran",
+                    market="commodity",
+                    auction_id=None,
+                    item_id=210810,
+                    quantity=10,
+                    unit_price=1000,
+                    total_price=10000,
+                    raw={"event_type": "commodity_purchase_succeeded"},
+                ),
+            ],
+        )
+    )
+
+    activity = DashboardDataStore(
+        f"sqlite:///{db_path}",
+        tracked_item_ids=frozenset({219946}),
+    ).overview()["player_activity"]
+
+    assert activity["profit_loss"]["summary"]["cost"] == 8000
+    assert activity["profit_loss"]["summary"]["net_profit"] == -8000
+    assert [item["item_id"] for item in activity["profit_loss"]["items"]] == [219946]
+
+
 def test_format_file_size() -> None:
     assert format_file_size(512) == "512 B"
     assert format_file_size(2048) == "2.0 KiB"

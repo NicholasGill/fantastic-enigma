@@ -274,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(f"unsupported db command {args.db_command}")
 
     if args.command == "dashboard":
+        config = load_config(args.config)
         serve_dashboard(
             DashboardConfig(
                 database_url=args.database_url,
@@ -282,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
                 dev_mode=args.dev_mode,
                 reload=args.reload,
                 addon_saved_variables_path=args.addon_saved_variables,
+                tracked_item_ids=frozenset(item.id for item in config.all_tracked_items),
             )
         )
         return 0

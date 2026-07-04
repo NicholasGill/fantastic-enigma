@@ -33,12 +33,14 @@ class DashboardConfig:
     dev_mode: bool = False
     reload: bool = False
     addon_saved_variables_path: Path | None = None
+    tracked_item_ids: frozenset[int] | None = None
 
 
 class DashboardDataStore:
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, tracked_item_ids: frozenset[int] | None = None) -> None:
         self.database_url = database_url
         self.database_path = _sqlite_database_path(database_url)
+        self.tracked_item_ids = tracked_item_ids
 
     def overview(self, *, display_timezone: str = DEFAULT_DISPLAY_TIMEZONE, dev_mode: bool = False) -> dict[str, Any]:
         with self._connect() as connection:
@@ -408,8 +410,7 @@ class DashboardDataStore:
             opportunities.append(opportunity)
         return opportunities
 
-    @staticmethod
-    def _player_activity(connection: sqlite3.Connection) -> dict[str, Any]:
+    def _player_activity(self, connection: sqlite3.Connection) -> dict[str, Any]:
         latest_import = connection.execute(
             """
             select
@@ -552,12 +553,12 @@ class DashboardDataStore:
             "purchases": [dict(row) for row in purchases],
             "buy_opportunities": [dict(row) for row in buy_opportunities],
             "performance": _player_performance(connection),
-            "profit_loss": _player_profit_loss(connection),
+            "profit_loss": _player_profit_loss(connection, tracked_item_ids=self.tracked_item_ids),
         }
 
 
 def create_dashboard_app(config: DashboardConfig) -> Flask:
-    store = DashboardDataStore(config.database_url)
+    store = DashboardDataStore(config.database_url, tracked_item_ids=config.tracked_item_ids)
     app = Flask(__name__)
 
     @app.after_request
@@ -708,7 +709,11 @@ def _player_performance(connection: sqlite3.Connection, *, window_days: int | No
     return performance
 
 
-def _player_profit_loss(connection: sqlite3.Connection) -> dict[str, Any]:
+def _player_profit_loss(
+    connection: sqlite3.Connection,
+    *,
+    tracked_item_ids: frozenset[int] | None = None,
+) -> dict[str, Any]:
     sale_rows = connection.execute(
         """
         with canonical_sales as (
@@ -764,6 +769,8 @@ def _player_profit_loss(connection: sqlite3.Connection) -> dict[str, Any]:
     rows_by_key: dict[str, dict[str, Any]] = {}
     for row in sale_rows:
         item = dict(row)
+        if not _is_configured_profit_loss_item(item.get("item_id"), tracked_item_ids):
+            continue
         key = _profit_loss_key(item.get("item_id"), item.get("name"))
         rows_by_key[key] = {
             "item_id": item.get("item_id"),
@@ -778,6 +785,8 @@ def _player_profit_loss(connection: sqlite3.Connection) -> dict[str, Any]:
 
     for row in purchase_rows:
         item = dict(row)
+        if not _is_configured_profit_loss_item(item.get("item_id"), tracked_item_ids):
+            continue
         key = _profit_loss_key(item.get("item_id"), item.get("name"))
         target = rows_by_key.setdefault(
             key,
@@ -849,6 +858,16 @@ def _player_profit_loss(connection: sqlite3.Connection) -> dict[str, Any]:
         },
         "items": rows[:50],
     }
+
+
+def _is_configured_profit_loss_item(item_id: object, tracked_item_ids: frozenset[int] | None) -> bool:
+    if tracked_item_ids is None:
+        return True
+    try:
+        parsed_item_id = int(item_id)
+    except (TypeError, ValueError):
+        return False
+    return parsed_item_id in tracked_item_ids
 
 
 def _profit_loss_key(item_id: object, name: object) -> str:
