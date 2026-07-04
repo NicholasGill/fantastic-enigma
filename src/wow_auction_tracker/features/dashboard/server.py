@@ -780,23 +780,52 @@ def _player_profit_loss(connection: sqlite3.Connection) -> dict[str, Any]:
     for row in rows_by_key.values():
         revenue = int(row["revenue"])
         cost = int(row["cost"])
-        row["net_profit"] = revenue - cost
-        row["margin_bps"] = round((row["net_profit"] / revenue) * 10000) if revenue else None
+        if revenue > 0 and cost > 0:
+            row["cost_basis_status"] = "complete"
+            row["net_profit"] = revenue - cost
+            row["margin_bps"] = round((row["net_profit"] / revenue) * 10000)
+        elif revenue > 0:
+            row["cost_basis_status"] = "missing_cost"
+            row["net_profit"] = None
+            row["margin_bps"] = None
+        else:
+            row["cost_basis_status"] = "open_purchase"
+            row["net_profit"] = None
+            row["margin_bps"] = None
         rows.append(row)
 
-    rows.sort(key=lambda row: (int(row["net_profit"]), int(row["revenue"])), reverse=True)
+    rows.sort(
+        key=lambda row: (
+            row["net_profit"] is not None,
+            int(row["net_profit"] or 0),
+            int(row["revenue"]),
+        ),
+        reverse=True,
+    )
     revenue = sum(int(row["revenue"]) for row in rows)
     cost = sum(int(row["cost"]) for row in rows)
+    known_rows = [row for row in rows if row["net_profit"] is not None]
+    known_revenue = sum(int(row["revenue"]) for row in known_rows)
+    known_cost = sum(int(row["cost"]) for row in known_rows)
+    known_net_profit = known_revenue - known_cost
     return {
         "summary": {
             "revenue": revenue,
             "cost": cost,
-            "net_profit": revenue - cost,
+            "known_revenue": known_revenue,
+            "known_cost": known_cost,
+            "net_profit": known_net_profit,
+            "unmatched_revenue": sum(
+                int(row["revenue"]) for row in rows if row["cost_basis_status"] == "missing_cost"
+            ),
+            "open_purchase_cost": sum(
+                int(row["cost"]) for row in rows if row["cost_basis_status"] == "open_purchase"
+            ),
             "sale_count": sum(int(row["sale_count"]) for row in rows),
             "purchase_count": sum(int(row["purchase_count"]) for row in rows),
             "sold_quantity": sum(int(row["sold_quantity"]) for row in rows),
             "purchased_quantity": sum(int(row["purchased_quantity"]) for row in rows),
-            "margin_bps": round(((revenue - cost) / revenue) * 10000) if revenue else None,
+            "margin_bps": round((known_net_profit / known_revenue) * 10000) if known_revenue else None,
         },
         "items": rows[:50],
     }
@@ -1572,9 +1601,9 @@ DASHBOARD_HTML = """<!doctype html>
 
     <div class="tab-panel" id="profit-panel" role="tabpanel" aria-labelledby="profit-tab" data-panel="profit">
       <div class="profit-grid">
-        <div class="metric"><span>Net P/L</span><strong id="pl-net">-</strong></div>
-        <div class="metric"><span>Revenue</span><strong id="pl-revenue">-</strong></div>
-        <div class="metric"><span>Purchase Cost</span><strong id="pl-cost">-</strong></div>
+        <div class="metric"><span>Known P/L</span><strong id="pl-net">-</strong></div>
+        <div class="metric"><span>Gross Sales</span><strong id="pl-revenue">-</strong></div>
+        <div class="metric"><span>Purchase Spend</span><strong id="pl-cost">-</strong></div>
         <div class="metric"><span>Margin</span><strong id="pl-margin">-</strong></div>
       </div>
       <section>
@@ -1593,6 +1622,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <th>Cost</th>
                 <th>Net</th>
                 <th>Margin</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody id="profit-loss-table"></tbody>
@@ -2020,7 +2050,7 @@ DASHBOARD_HTML = """<!doctype html>
       els.plRevenue.textContent = gold(summary.revenue);
       els.plCost.textContent = gold(summary.cost);
       els.plMargin.textContent = margin(summary.margin_bps);
-      els.plNote.textContent = `${integer(summary.sale_count)} sales, ${integer(summary.purchase_count)} purchases`;
+      els.plNote.textContent = `${integer(summary.sale_count)} sales, ${integer(summary.purchase_count)} purchases, ${gold(summary.unmatched_revenue)} sales missing cost basis`;
 
       const rows = profitLoss.items || [];
       els.profitLossTable.innerHTML = rows.length ? rows.map((row) => {
@@ -2033,8 +2063,18 @@ DASHBOARD_HTML = """<!doctype html>
           <td>${gold(row.cost)}</td>
           <td class="${itemNet.cls}">${itemNet.text}</td>
           <td>${margin(row.margin_bps)}</td>
+          <td>${costBasisLabel(row.cost_basis_status)}</td>
         </tr>`;
-      }).join('') : '<tr><td colspan="7" class="muted">No sale or purchase data imported yet.</td></tr>';
+      }).join('') : '<tr><td colspan="8" class="muted">No sale or purchase data imported yet.</td></tr>';
+    }
+
+    function costBasisLabel(value) {
+      const labels = {
+        complete: 'cost matched',
+        missing_cost: 'missing cost',
+        open_purchase: 'open purchase'
+      };
+      return labels[value] || '-';
     }
 
     function setActiveTab(tabName) {

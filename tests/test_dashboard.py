@@ -420,6 +420,7 @@ def test_dashboard_overview_returns_player_activity(tmp_path: Path) -> None:
     assert activity["profit_loss"]["summary"]["net_profit"] == 78000
     assert activity["profit_loss"]["items"][0]["name"] == "Storm Dust"
     assert activity["profit_loss"]["items"][0]["net_profit"] == 78000
+    assert activity["profit_loss"]["items"][0]["cost_basis_status"] == "complete"
     assert activity["buy_opportunities"][0]["potential_profit"] == 50000
     assert payload["craft_opportunities"][0]["recipe_id"] == "enchant-dust"
     assert payload["craft_opportunities"][0]["output_name"] == "Storm Dust"
@@ -504,6 +505,44 @@ def test_dashboard_infers_outcome_item_from_owned_quantity_drop(tmp_path: Path) 
     assert activity["outcomes"][0]["item_id"] == 219946
 
 
+def test_dashboard_profit_loss_does_not_count_sales_without_cost_as_profit(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    repository.import_addon_data(
+        AddonImportResult(
+            source_path=tmp_path / "WowAuctionTracker.lua",
+            addon_version=1,
+            posts=[],
+            outcomes=[
+                PlayerAuctionOutcome(
+                    observed_at=datetime(2026, 7, 1, 5, 30, tzinfo=UTC),
+                    character="Arces",
+                    realm="Dalaran",
+                    mail_index=1,
+                    item_id=219946,
+                    item_name="Storm Dust",
+                    item_count=1000,
+                    outcome="sold",
+                    money=86000,
+                    raw={"outcome": "sold"},
+                )
+            ],
+            purchases=[],
+        )
+    )
+
+    activity = DashboardDataStore(f"sqlite:///{db_path}").overview()["player_activity"]
+
+    assert activity["profit_loss"]["summary"]["revenue"] == 86000
+    assert activity["profit_loss"]["summary"]["unmatched_revenue"] == 86000
+    assert activity["profit_loss"]["summary"]["net_profit"] == 0
+    assert activity["profit_loss"]["summary"]["margin_bps"] is None
+    assert activity["profit_loss"]["items"][0]["net_profit"] is None
+    assert activity["profit_loss"]["items"][0]["cost_basis_status"] == "missing_cost"
+
+
 def test_format_file_size() -> None:
     assert format_file_size(512) == "512 B"
     assert format_file_size(2048) == "2.0 KiB"
@@ -541,6 +580,8 @@ def test_dashboard_table_headers_have_tooltips() -> None:
     assert 'id="profit-panel"' in DASHBOARD_HTML
     assert 'id="profit-loss-table"' in DASHBOARD_HTML
     assert "Profit / Loss" in DASHBOARD_HTML
+    assert "Known P/L" in DASHBOARD_HTML
+    assert "costBasisLabel" in DASHBOARD_HTML
     assert "setActiveTab" in DASHBOARD_HTML
     assert "tabFromPath" in DASHBOARD_HTML
     assert "navigateTab" in DASHBOARD_HTML
