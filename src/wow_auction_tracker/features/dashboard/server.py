@@ -810,7 +810,7 @@ def _player_profit_loss(connection: sqlite3.Connection) -> dict[str, Any]:
             row["margin_bps"] = None
         else:
             row["cost_basis_status"] = "open_purchase"
-            row["net_profit"] = None
+            row["net_profit"] = -cost if cost > 0 else None
             row["margin_bps"] = None
         rows.append(row)
 

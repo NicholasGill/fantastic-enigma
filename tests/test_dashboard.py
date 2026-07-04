@@ -543,6 +543,46 @@ def test_dashboard_profit_loss_does_not_count_sales_without_cost_as_profit(tmp_p
     assert activity["profit_loss"]["items"][0]["cost_basis_status"] == "missing_cost"
 
 
+def test_dashboard_profit_loss_counts_open_purchases_as_negative_profit(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    repository.import_addon_data(
+        AddonImportResult(
+            source_path=tmp_path / "WowAuctionTracker.lua",
+            addon_version=1,
+            posts=[],
+            outcomes=[],
+            purchases=[
+                PlayerAuctionPurchase(
+                    observed_at=datetime(2026, 7, 1, 5, 20, tzinfo=UTC),
+                    event_type="commodity_purchase_succeeded",
+                    character="Arces",
+                    realm="Dalaran",
+                    market="commodity",
+                    auction_id=None,
+                    item_id=219946,
+                    quantity=100,
+                    unit_price=80,
+                    total_price=8000,
+                    raw={"event_type": "commodity_purchase_succeeded"},
+                )
+            ],
+        )
+    )
+
+    activity = DashboardDataStore(f"sqlite:///{db_path}").overview()["player_activity"]
+
+    assert activity["profit_loss"]["summary"]["revenue"] == 0
+    assert activity["profit_loss"]["summary"]["cost"] == 8000
+    assert activity["profit_loss"]["summary"]["open_purchase_cost"] == 8000
+    assert activity["profit_loss"]["summary"]["net_profit"] == -8000
+    assert activity["profit_loss"]["summary"]["margin_bps"] is None
+    assert activity["profit_loss"]["items"][0]["net_profit"] == -8000
+    assert activity["profit_loss"]["items"][0]["cost_basis_status"] == "open_purchase"
+
+
 def test_dashboard_profit_loss_dedupes_reimported_sale_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")
