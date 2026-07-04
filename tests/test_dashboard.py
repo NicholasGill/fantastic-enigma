@@ -197,13 +197,16 @@ def test_dashboard_flask_app_serves_html_and_json(tmp_path: Path) -> None:
     client = app.test_client()
     html_response = client.get("/")
     player_html_response = client.get("/my-auctions")
+    profit_html_response = client.get("/profit-loss")
     overview_response = client.get("/api/overview")
     missing_history_response = client.get("/api/history")
 
     assert html_response.status_code == 200
     assert player_html_response.status_code == 200
+    assert profit_html_response.status_code == 200
     assert b"WoW Auction Tracker" in html_response.data
     assert b"My Auctions" in player_html_response.data
+    assert b"Profit / Loss" in profit_html_response.data
     assert overview_response.status_code == 200
     assert overview_response.get_json()["counts"]["fetch_runs"] == 0
     assert missing_history_response.status_code == 400
@@ -412,6 +415,11 @@ def test_dashboard_overview_returns_player_activity(tmp_path: Path) -> None:
     assert activity["purchases"][0]["name"] == "Storm Dust"
     assert activity["purchases"][0]["total_price"] == 8000
     assert activity["outcomes"][0]["outcome"] == "sold"
+    assert activity["profit_loss"]["summary"]["revenue"] == 86000
+    assert activity["profit_loss"]["summary"]["cost"] == 8000
+    assert activity["profit_loss"]["summary"]["net_profit"] == 78000
+    assert activity["profit_loss"]["items"][0]["name"] == "Storm Dust"
+    assert activity["profit_loss"]["items"][0]["net_profit"] == 78000
     assert activity["buy_opportunities"][0]["potential_profit"] == 50000
     assert payload["craft_opportunities"][0]["recipe_id"] == "enchant-dust"
     assert payload["craft_opportunities"][0]["output_name"] == "Storm Dust"
@@ -529,10 +537,16 @@ def test_dashboard_table_headers_have_tooltips() -> None:
     assert "Fetch Stats" in DASHBOARD_HTML
     assert 'data-tab="player"' in DASHBOARD_HTML
     assert 'id="player-panel"' in DASHBOARD_HTML
+    assert 'data-tab="profit"' in DASHBOARD_HTML
+    assert 'id="profit-panel"' in DASHBOARD_HTML
+    assert 'id="profit-loss-table"' in DASHBOARD_HTML
+    assert "Profit / Loss" in DASHBOARD_HTML
     assert "setActiveTab" in DASHBOARD_HTML
     assert "tabFromPath" in DASHBOARD_HTML
     assert "navigateTab" in DASHBOARD_HTML
     assert "renderPlayerActivity" in DASHBOARD_HTML
+    assert "renderProfitLoss" in DASHBOARD_HTML
+    assert "/profit-loss" in DASHBOARD_HTML
     assert "source-badge" in DASHBOARD_HTML
     assert "sellSourceBadge" in DASHBOARD_HTML
     assert "drawLine(ctx, points, x, y, 'min_unit_price'" in DASHBOARD_HTML

@@ -552,6 +552,7 @@ class DashboardDataStore:
             "purchases": [dict(row) for row in purchases],
             "buy_opportunities": [dict(row) for row in buy_opportunities],
             "performance": _player_performance(connection),
+            "profit_loss": _player_profit_loss(connection),
         }
 
 
@@ -566,6 +567,7 @@ def create_dashboard_app(config: DashboardConfig) -> Flask:
 
     @app.get("/")
     @app.get("/my-auctions")
+    @app.get("/profit-loss")
     @app.get("/market")
     @app.get("/stats")
     def _index() -> Response:
@@ -704,6 +706,106 @@ def _player_performance(connection: sqlite3.Connection, *, window_days: int | No
             if row.get(key) is not None:
                 row[key] = round(float(row[key]))
     return performance
+
+
+def _player_profit_loss(connection: sqlite3.Connection) -> dict[str, Any]:
+    sale_rows = connection.execute(
+        """
+        select
+            coalesce(o.item_id, m.item_id) as item_id,
+            coalesce(md.name, o.item_name, t.name, 'Item ' || coalesce(o.item_id, m.item_id)) as name,
+            count(*) as sale_count,
+            coalesce(sum(o.item_count), 0) as sold_quantity,
+            coalesce(sum(o.money), 0) as revenue
+        from player_auction_outcomes o
+        left join player_auction_matches m on m.outcome_id = o.id
+        left join item_metadata md on md.item_id = coalesce(o.item_id, m.item_id)
+        left join tracked_items t on t.item_id = coalesce(o.item_id, m.item_id)
+        where o.outcome = 'sold'
+        group by coalesce(o.item_id, m.item_id), coalesce(md.name, o.item_name, t.name)
+        """
+    ).fetchall()
+    purchase_rows = connection.execute(
+        """
+        select
+            p.item_id,
+            coalesce(md.name, t.name, 'Item ' || p.item_id) as name,
+            count(*) as purchase_count,
+            coalesce(sum(p.quantity), 0) as purchased_quantity,
+            coalesce(sum(p.total_price), 0) as cost
+        from player_auction_purchases p
+        left join item_metadata md on md.item_id = p.item_id
+        left join tracked_items t on t.item_id = p.item_id
+        where p.event_type in ('auction_purchase_completed', 'commodity_purchase_succeeded')
+        group by p.item_id, coalesce(md.name, t.name)
+        """
+    ).fetchall()
+
+    rows_by_key: dict[str, dict[str, Any]] = {}
+    for row in sale_rows:
+        item = dict(row)
+        key = _profit_loss_key(item.get("item_id"), item.get("name"))
+        rows_by_key[key] = {
+            "item_id": item.get("item_id"),
+            "name": item.get("name") or "Unknown",
+            "sale_count": int(item.get("sale_count") or 0),
+            "sold_quantity": int(item.get("sold_quantity") or 0),
+            "revenue": int(item.get("revenue") or 0),
+            "purchase_count": 0,
+            "purchased_quantity": 0,
+            "cost": 0,
+        }
+
+    for row in purchase_rows:
+        item = dict(row)
+        key = _profit_loss_key(item.get("item_id"), item.get("name"))
+        target = rows_by_key.setdefault(
+            key,
+            {
+                "item_id": item.get("item_id"),
+                "name": item.get("name") or "Unknown",
+                "sale_count": 0,
+                "sold_quantity": 0,
+                "revenue": 0,
+                "purchase_count": 0,
+                "purchased_quantity": 0,
+                "cost": 0,
+            },
+        )
+        target["purchase_count"] = int(item.get("purchase_count") or 0)
+        target["purchased_quantity"] = int(item.get("purchased_quantity") or 0)
+        target["cost"] = int(item.get("cost") or 0)
+
+    rows = []
+    for row in rows_by_key.values():
+        revenue = int(row["revenue"])
+        cost = int(row["cost"])
+        row["net_profit"] = revenue - cost
+        row["margin_bps"] = round((row["net_profit"] / revenue) * 10000) if revenue else None
+        rows.append(row)
+
+    rows.sort(key=lambda row: (int(row["net_profit"]), int(row["revenue"])), reverse=True)
+    revenue = sum(int(row["revenue"]) for row in rows)
+    cost = sum(int(row["cost"]) for row in rows)
+    return {
+        "summary": {
+            "revenue": revenue,
+            "cost": cost,
+            "net_profit": revenue - cost,
+            "sale_count": sum(int(row["sale_count"]) for row in rows),
+            "purchase_count": sum(int(row["purchase_count"]) for row in rows),
+            "sold_quantity": sum(int(row["sold_quantity"]) for row in rows),
+            "purchased_quantity": sum(int(row["purchased_quantity"]) for row in rows),
+            "margin_bps": round(((revenue - cost) / revenue) * 10000) if revenue else None,
+        },
+        "items": rows[:50],
+    }
+
+
+def _profit_loss_key(item_id: object, name: object) -> str:
+    if item_id is not None:
+        return f"id:{item_id}"
+    return f"name:{str(name or 'unknown').strip().lower()}"
 
 
 def _item_ids_by_name_and_sold_quantity(connection: sqlite3.Connection) -> dict[tuple[str, int], int]:
@@ -1016,6 +1118,12 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .player-grid section:first-child {
       grid-column: 1 / -1;
+    }
+    .profit-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
     }
     section {
       min-width: 0;
@@ -1338,6 +1446,7 @@ DASHBOARD_HTML = """<!doctype html>
       main { padding: 14px; }
       .market-layout, .player-grid { grid-template-columns: 1fr; }
       .player-grid section:first-child { grid-column: auto; }
+      .profit-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       header { padding: 14px; align-items: flex-start; flex-direction: column; }
       .top-tabs { top: 132px; padding: 10px 14px 0; }
@@ -1371,6 +1480,7 @@ DASHBOARD_HTML = """<!doctype html>
       <button class="tab-button active" id="market-tab" type="button" role="tab" aria-selected="true" aria-controls="market-panel" data-tab="market">Market</button>
       <button class="tab-button" id="stats-tab" type="button" role="tab" aria-selected="false" aria-controls="stats-panel" data-tab="stats">Fetch Stats</button>
       <button class="tab-button" id="player-tab" type="button" role="tab" aria-selected="false" aria-controls="player-panel" data-tab="player">My Auctions</button>
+      <button class="tab-button" id="profit-tab" type="button" role="tab" aria-selected="false" aria-controls="profit-panel" data-tab="profit">Profit / Loss</button>
     </div>
   </nav>
   <main>
@@ -1457,6 +1567,37 @@ DASHBOARD_HTML = """<!doctype html>
       <section>
         <div class="section-head"><h2>Recent Runs</h2></div>
         <div class="runs" id="runs"></div>
+      </section>
+    </div>
+
+    <div class="tab-panel" id="profit-panel" role="tabpanel" aria-labelledby="profit-tab" data-panel="profit">
+      <div class="profit-grid">
+        <div class="metric"><span>Net P/L</span><strong id="pl-net">-</strong></div>
+        <div class="metric"><span>Revenue</span><strong id="pl-revenue">-</strong></div>
+        <div class="metric"><span>Purchase Cost</span><strong id="pl-cost">-</strong></div>
+        <div class="metric"><span>Margin</span><strong id="pl-margin">-</strong></div>
+      </div>
+      <section>
+        <div class="section-head">
+          <h2>Profit / Loss by Item</h2>
+          <span class="muted" id="pl-note">-</span>
+        </div>
+        <div class="mini-table-wrap">
+          <table class="mini-table">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th>Sold Qty</th>
+                <th>Bought Qty</th>
+                <th>Revenue</th>
+                <th>Cost</th>
+                <th>Net</th>
+                <th>Margin</th>
+              </tr>
+            </thead>
+            <tbody id="profit-loss-table"></tbody>
+          </table>
+        </div>
       </section>
     </div>
 
@@ -1555,6 +1696,12 @@ DASHBOARD_HTML = """<!doctype html>
       myBuys: document.getElementById('my-buys'),
       buySignals: document.getElementById('buy-signals'),
       craftSignals: document.getElementById('craft-signals'),
+      plNet: document.getElementById('pl-net'),
+      plRevenue: document.getElementById('pl-revenue'),
+      plCost: document.getElementById('pl-cost'),
+      plMargin: document.getElementById('pl-margin'),
+      plNote: document.getElementById('pl-note'),
+      profitLossTable: document.getElementById('profit-loss-table'),
       latestTime: document.getElementById('latest-time'),
       items: document.getElementById('items'),
       recommendations: document.getElementById('recommendations'),
@@ -1595,6 +1742,11 @@ DASHBOARD_HTML = """<!doctype html>
     function bps(value) {
       if (value === null || value === undefined) return '-';
       return `${(value / 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
+    }
+
+    function margin(value) {
+      if (value === null || value === undefined) return '-';
+      return bps(value);
     }
 
     function qualityLabel(value) {
@@ -1712,6 +1864,7 @@ DASHBOARD_HTML = """<!doctype html>
       renderRecommendations();
       renderCraftSignals();
       renderPlayerActivity();
+      renderProfitLoss();
       renderRuns();
     }
 
@@ -1858,6 +2011,32 @@ DASHBOARD_HTML = """<!doctype html>
       }).join('') : '<tr><td colspan="5" class="muted">No auction outcomes imported.</td></tr>';
     }
 
+    function renderProfitLoss() {
+      const profitLoss = overview.player_activity?.profit_loss || {};
+      const summary = profitLoss.summary || {};
+      const net = profit(summary.net_profit);
+      els.plNet.textContent = net.text;
+      els.plNet.className = net.cls;
+      els.plRevenue.textContent = gold(summary.revenue);
+      els.plCost.textContent = gold(summary.cost);
+      els.plMargin.textContent = margin(summary.margin_bps);
+      els.plNote.textContent = `${integer(summary.sale_count)} sales, ${integer(summary.purchase_count)} purchases`;
+
+      const rows = profitLoss.items || [];
+      els.profitLossTable.innerHTML = rows.length ? rows.map((row) => {
+        const itemNet = profit(row.net_profit);
+        return `<tr>
+          <td>${itemName(row.name)}<br><span class="muted">#${row.item_id || '-'}</span></td>
+          <td>${integer(row.sold_quantity)}</td>
+          <td>${integer(row.purchased_quantity)}</td>
+          <td>${gold(row.revenue)}</td>
+          <td>${gold(row.cost)}</td>
+          <td class="${itemNet.cls}">${itemNet.text}</td>
+          <td>${margin(row.margin_bps)}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="7" class="muted">No sale or purchase data imported yet.</td></tr>';
+    }
+
     function setActiveTab(tabName) {
       els.tabButtons.forEach((button) => {
         const active = button.dataset.tab === tabName;
@@ -1871,12 +2050,14 @@ DASHBOARD_HTML = """<!doctype html>
 
     function tabFromPath() {
       if (window.location.pathname === '/my-auctions') return 'player';
+      if (window.location.pathname === '/profit-loss') return 'profit';
       if (window.location.pathname === '/stats') return 'stats';
       return 'market';
     }
 
     function pathForTab(tabName) {
       if (tabName === 'stats') return '/stats';
+      if (tabName === 'profit') return '/profit-loss';
       return tabName === 'player' ? '/my-auctions' : '/market';
     }
 
