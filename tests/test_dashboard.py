@@ -543,6 +543,61 @@ def test_dashboard_profit_loss_does_not_count_sales_without_cost_as_profit(tmp_p
     assert activity["profit_loss"]["items"][0]["cost_basis_status"] == "missing_cost"
 
 
+def test_dashboard_profit_loss_dedupes_reimported_sale_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    sale = PlayerAuctionOutcome(
+        observed_at=datetime(2026, 7, 1, 5, 30, tzinfo=UTC),
+        character="Arces",
+        realm="Dalaran",
+        mail_index=1,
+        item_id=219946,
+        item_name="Storm Dust",
+        item_count=1000,
+        outcome="sold",
+        money=86000,
+        raw={"outcome": "sold"},
+    )
+    repository.import_addon_data(
+        AddonImportResult(
+            source_path=tmp_path / "first.lua",
+            addon_version=1,
+            posts=[],
+            outcomes=[sale],
+            purchases=[],
+        )
+    )
+    repository.import_addon_data(
+        AddonImportResult(
+            source_path=tmp_path / "second.lua",
+            addon_version=1,
+            posts=[],
+            outcomes=[
+                PlayerAuctionOutcome(
+                    observed_at=sale.observed_at,
+                    character=sale.character,
+                    realm=sale.realm,
+                    mail_index=2,
+                    item_id=sale.item_id,
+                    item_name=sale.item_name,
+                    item_count=sale.item_count,
+                    outcome=sale.outcome,
+                    money=sale.money,
+                    raw={"outcome": "sold", "scan_id": "later"},
+                )
+            ],
+            purchases=[],
+        )
+    )
+
+    activity = DashboardDataStore(f"sqlite:///{db_path}").overview()["player_activity"]
+
+    assert activity["profit_loss"]["summary"]["revenue"] == 86000
+    assert activity["profit_loss"]["summary"]["sale_count"] == 1
+
+
 def test_format_file_size() -> None:
     assert format_file_size(512) == "512 B"
     assert format_file_size(2048) == "2.0 KiB"

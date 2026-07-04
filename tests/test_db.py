@@ -492,6 +492,53 @@ def test_repository_imports_player_addon_rows(tmp_path) -> None:
     assert matches[0].confidence == 100
 
 
+def test_import_addon_dedupes_mail_events_with_unstable_mail_index_and_raw_fields(tmp_path) -> None:
+    from wow_auction_tracker.features.player import import_saved_variables
+
+    saved_variables = tmp_path / "WowAuctionTracker.lua"
+    saved_variables.write_text(
+        """
+        WowAuctionTrackerDB = {
+          ["version"] = 3,
+          ["mail_events"] = {
+            {
+              ["observed_at"] = 1710000300,
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["mail_index"] = 1,
+              ["outcome"] = "sold",
+              ["money"] = 45000,
+              ["subject"] = "Auction successful: Bismuth (5)",
+            },
+            {
+              ["observed_at"] = 1710000300,
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["mail_index"] = 2,
+              ["outcome"] = "sold",
+              ["money"] = 45000,
+              ["subject"] = "Auction successful: Bismuth (5)",
+              ["scan_id"] = "later",
+            },
+          },
+        }
+        """,
+        encoding="utf-8",
+    )
+    engine = create_db_engine("sqlite:///:memory:")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+
+    repository.import_addon_data(import_saved_variables(saved_variables))
+
+    with Session(engine) as session:
+        outcomes = session.scalars(select(PlayerAuctionOutcomeRecord)).all()
+
+    assert len(outcomes) == 1
+    assert outcomes[0].item_name == "Bismuth"
+    assert outcomes[0].item_count == 5
+
+
 def test_import_addon_dedupes_purchase_events_and_skips_empty_completion(tmp_path) -> None:
     from wow_auction_tracker.features.player import import_saved_variables
 

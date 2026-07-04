@@ -711,18 +711,38 @@ def _player_performance(connection: sqlite3.Connection, *, window_days: int | No
 def _player_profit_loss(connection: sqlite3.Connection) -> dict[str, Any]:
     sale_rows = connection.execute(
         """
+        with canonical_sales as (
+            select
+                min(o.id) as id,
+                o.observed_at,
+                o.character,
+                o.realm,
+                coalesce(o.item_id, m.item_id) as item_id,
+                coalesce(md.name, o.item_name, t.name, 'Item ' || coalesce(o.item_id, m.item_id)) as name,
+                o.item_count,
+                o.money
+            from player_auction_outcomes o
+            left join player_auction_matches m on m.outcome_id = o.id
+            left join item_metadata md on md.item_id = coalesce(o.item_id, m.item_id)
+            left join tracked_items t on t.item_id = coalesce(o.item_id, m.item_id)
+            where o.outcome = 'sold'
+            group by
+                o.observed_at,
+                o.character,
+                o.realm,
+                coalesce(o.item_id, m.item_id),
+                coalesce(md.name, o.item_name, t.name),
+                o.item_count,
+                o.money
+        )
         select
-            coalesce(o.item_id, m.item_id) as item_id,
-            coalesce(md.name, o.item_name, t.name, 'Item ' || coalesce(o.item_id, m.item_id)) as name,
+            item_id,
+            name,
             count(*) as sale_count,
-            coalesce(sum(o.item_count), 0) as sold_quantity,
-            coalesce(sum(o.money), 0) as revenue
-        from player_auction_outcomes o
-        left join player_auction_matches m on m.outcome_id = o.id
-        left join item_metadata md on md.item_id = coalesce(o.item_id, m.item_id)
-        left join tracked_items t on t.item_id = coalesce(o.item_id, m.item_id)
-        where o.outcome = 'sold'
-        group by coalesce(o.item_id, m.item_id), coalesce(md.name, o.item_name, t.name)
+            coalesce(sum(item_count), 0) as sold_quantity,
+            coalesce(sum(money), 0) as revenue
+        from canonical_sales
+        group by item_id, name
         """
     ).fetchall()
     purchase_rows = connection.execute(

@@ -1270,11 +1270,9 @@ def _outcome_row_hash(outcome: PlayerAuctionOutcome) -> str:
     return row_hash(
         "outcome",
         {
-            "raw": outcome.raw,
             "observed_at": outcome.observed_at.isoformat() if outcome.observed_at else None,
             "character": outcome.character,
             "realm": outcome.realm,
-            "mail_index": outcome.mail_index,
             "item_id": outcome.item_id,
             "item_name": outcome.item_name,
             "item_count": outcome.item_count,

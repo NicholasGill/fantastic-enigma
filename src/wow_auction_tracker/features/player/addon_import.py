@@ -74,6 +74,7 @@ def import_saved_variables(path: Path) -> AddonImportResult:
     owned_rows, malformed_owned = _list_of_dicts(payload.get("owned_snapshots"))
     mail_rows, malformed_mail = _list_of_dicts(payload.get("mail_events"))
     purchase_rows, malformed_purchases = _list_of_dicts(payload.get("purchase_events"))
+    mail_rows = _dedupe_mail_rows(mail_rows)
     purchase_rows = _dedupe_purchase_rows(
         _enrich_purchase_rows(purchase_rows)
     )
@@ -185,6 +186,32 @@ def _dedupe_purchase_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(key)
         deduped.append(row)
     return deduped
+
+
+def _dedupe_mail_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for row in rows:
+        key = _mail_row_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def _mail_row_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    subject_name, subject_count = parse_auction_mail_subject(_str_or_none(row.get("subject")))
+    return (
+        _int_or_none(row.get("observed_at")),
+        _str_or_none(row.get("character")),
+        _str_or_none(row.get("realm")),
+        _int_or_none(row.get("first_item_id")),
+        _str_or_none(row.get("first_item_name")) or subject_name,
+        _int_or_none(row.get("first_item_count")) or subject_count or _int_or_none(row.get("item_count")),
+        _str_or_none(row.get("outcome")) or "unknown",
+        _int_or_none(row.get("money")),
+    )
 
 
 def _is_empty_purchase_completion(row: dict[str, Any]) -> bool:
