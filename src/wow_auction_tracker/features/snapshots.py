@@ -58,12 +58,17 @@ def fetch_and_store(
             if previous_fetch_run_id is not None
             else []
         )
+        elapsed_seconds = _elapsed_seconds_between_runs(repository, previous_fetch_run_id, fetch_run_id)
         listing_observations = build_listing_observations(
             listings,
             previous_listings,
-            elapsed_seconds=_elapsed_seconds_between_runs(repository, previous_fetch_run_id, fetch_run_id),
+            elapsed_seconds=elapsed_seconds,
         )
-        sell_through_metrics = build_sell_through_metrics(listing_observations)
+        sell_through_metrics = build_sell_through_metrics(
+            listing_observations,
+            elapsed_seconds=elapsed_seconds,
+            expected_interval_seconds=expected_interval_seconds,
+        )
         recommendations = _load_prior_recommendations(repository)
         buy_opportunity_observations = build_buy_opportunity_observations(
             listings,

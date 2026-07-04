@@ -4,6 +4,7 @@ import argparse
 import csv
 import os
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.engine import make_url
@@ -42,6 +43,20 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init-db", help="Create database tables.")
     subparsers.add_parser("recompute-inference", help="Recompute derived listing lifecycle and sell-through rows.")
+    db_parser = subparsers.add_parser("db", help="Inspect and maintain the local database.")
+    db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
+    db_subparsers.add_parser("stats", help="Show table sizes and snapshot range.")
+    db_subparsers.add_parser("vacuum", help="Run SQLite VACUUM to reclaim space.")
+    prune_parser = db_subparsers.add_parser(
+        "prune-raw-listings",
+        help="Delete old raw auction listings while preserving summaries and rollups.",
+    )
+    prune_parser.add_argument(
+        "--before-days",
+        type=_non_negative_int,
+        required=True,
+        help="Delete raw listings from successful fetch runs older than this many days.",
+    )
     subparsers.add_parser("fetch", help="Fetch configured auction listings and store a snapshot.")
     dashboard_parser = subparsers.add_parser("dashboard", help="Start the local dashboard web server.")
     dashboard_parser.add_argument(
@@ -112,6 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=10,
         help="Number of craft signals to show. Defaults to 10.",
+    )
+    report_anomalies_parser = report_subparsers.add_parser("anomalies", help="Show recent detected market anomalies.")
+    report_anomalies_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=10,
+        help="Number of anomaly rows to show. Defaults to 10.",
     )
     report_player_parser = report_subparsers.add_parser("player", help="Show personal auction performance.")
     report_player_parser.add_argument(
@@ -235,6 +257,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "db":
+        repository = AuctionRepository(engine)
+        if args.db_command == "stats":
+            _print_db_stats(repository.database_stats())
+            return 0
+        if args.db_command == "vacuum":
+            repository.vacuum()
+            print("Vacuumed SQLite database")
+            return 0
+        if args.db_command == "prune-raw-listings":
+            before = datetime.now(UTC) - timedelta(days=args.before_days)
+            deleted_count = repository.prune_raw_listings_before(before)
+            print(f"Deleted {deleted_count} raw auction listings older than {args.before_days} day(s)")
+            return 0
+        raise ValueError(f"unsupported db command {args.db_command}")
+
     if args.command == "dashboard":
         serve_dashboard(
             DashboardConfig(
@@ -268,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.report_command == "crafts":
             _print_craft_report(store.overview(), args.limit)
+            return 0
+        if args.report_command == "anomalies":
+            _print_anomaly_report(AuctionRepository(engine).list_recent_anomalies(limit=args.limit))
             return 0
         if args.report_command == "player":
             _print_player_report(store.player_performance(window_days=args.days), args.limit)
@@ -409,12 +450,17 @@ def _recompute_inference(repository: AuctionRepository) -> dict[str, int]:
     for run_id in run_ids:
         listings = repository.list_auction_listings(run_id)
         previous_listings = repository.list_listing_snapshots(previous_run_id) if previous_run_id is not None else []
+        elapsed_seconds = _elapsed_seconds_between_runs(repository, previous_run_id, run_id)
         observations = build_listing_observations(
             listings,
             previous_listings,
-            elapsed_seconds=_elapsed_seconds_between_runs(repository, previous_run_id, run_id),
+            elapsed_seconds=elapsed_seconds,
         )
-        metrics = build_sell_through_metrics(observations)
+        metrics = build_sell_through_metrics(
+            observations,
+            elapsed_seconds=elapsed_seconds,
+            expected_interval_seconds=repository.fetch_run_expected_interval_seconds(run_id),
+        )
         repository.replace_inference(run_id, observations, metrics)
         observation_count += len(observations)
         sell_through_count += len(metrics)
@@ -439,6 +485,17 @@ def _elapsed_seconds_between_runs(
     if previous_started_at is None or current_started_at is None:
         return None
     return max(0, round((current_started_at - previous_started_at).total_seconds()))
+
+
+def _print_db_stats(stats: dict[str, object]) -> None:
+    print(f"Successful fetch runs: {stats.get('successful_fetch_runs', 0)}")
+    print(f"Oldest snapshot: {stats.get('oldest_snapshot') or '-'}")
+    print(f"Newest snapshot: {stats.get('newest_snapshot') or '-'}")
+    print("Table counts:")
+    table_counts = stats.get("table_counts", {})
+    if isinstance(table_counts, dict):
+        for table_name in sorted(table_counts):
+            print(f"  {table_name}: {table_counts[table_name]}")
 
 
 def _print_recommendations(recommendations: list[Recommendation]) -> None:
@@ -539,6 +596,26 @@ def _print_craft_report(overview: dict[str, object], limit: int) -> None:
             f"{_format_copper(row.get('expected_profit')):>8}  "
             f"{int(row.get('max_craft_quantity') or 0):>3}  "
             f"{int(row.get('confidence') or 0):>10}"
+        )
+
+
+def _print_anomaly_report(rows: list[dict[str, object]]) -> None:
+    if not rows:
+        print("No anomalies available")
+        return
+
+    print("Run ID  Detected At          Type               Sev  Item ID  Name                 Observed  Baseline  Explanation")
+    for row in rows:
+        print(
+            f"{int(row.get('fetch_run_id') or 0):<6}  "
+            f"{str(row.get('detected_at') or '-')[:19]:<19} "
+            f"{str(row.get('anomaly_type') or '-')[:18]:<18} "
+            f"{int(row.get('severity') or 0):>3}  "
+            f"{int(row.get('item_id') or 0):<7}  "
+            f"{str(row.get('name') or 'Unknown')[:20]:<20} "
+            f"{_format_copper(_optional_export_int(row.get('observed_value'))):>8}  "
+            f"{_format_copper(_optional_export_int(row.get('baseline_value'))):>8}  "
+            f"{row.get('explanation') or ''}"
         )
 
 

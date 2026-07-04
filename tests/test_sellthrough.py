@@ -100,3 +100,39 @@ def test_build_sell_through_metrics_treats_quantity_drop_as_probable_sale() -> N
     assert metrics[0].probable_sold_quantity == 4
     assert metrics[0].probable_sold_value == 1000
     assert metrics[0].probable_sold_average_unit_price == 250
+
+
+def test_build_sell_through_metrics_downweights_irregular_snapshot_cadence() -> None:
+    observations = [
+        ListingObservation(
+            f"auction:{index}",
+            index,
+            210930,
+            "commodity",
+            "active",
+            1,
+            1,
+            100,
+            100,
+            None,
+            None,
+            None,
+            None,
+            "LONG",
+            "LONG",
+        )
+        for index in range(1, 21)
+    ]
+
+    regular = build_sell_through_metrics(
+        observations,
+        elapsed_seconds=1800,
+        expected_interval_seconds=1800,
+    )
+    irregular = build_sell_through_metrics(
+        observations,
+        elapsed_seconds=6 * 60 * 60,
+        expected_interval_seconds=1800,
+    )
+
+    assert regular[0].confidence > irregular[0].confidence

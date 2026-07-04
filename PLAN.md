@@ -59,31 +59,32 @@ snapshots into useful pricing and demand signals for tracked items.
   - Add safeguards to avoid overlapping fetch runs.
   - Record expected snapshot interval for inference calculations.
 
-- [ ] Add daily rollups and trend metrics.
+- [x] Add daily rollups and trend metrics.
   - Roll per-snapshot data into `item_daily_metrics`.
   - Track daily low, first quartile, median, third quartile, average quantity,
     listing count, disappeared quantity, and demand confidence.
   - Use rollups for long-range charts so the dashboard stays fast as the SQLite
     database grows.
 
-- [ ] Detect price anomalies and market events.
+- [x] Detect price anomalies and market events.
   - Flag sudden price spikes, crashes, and inventory droughts against recent
     baselines.
   - Store anomaly rows with item ID, run ID, severity, and explanation.
-  - Surface anomalies in CLI reports and the dashboard.
+  - Surface anomalies in CLI reports. Dashboard anomaly views still belong with
+    richer item detail pages.
 
-- [ ] Improve sell-through confidence scoring.
+- [x] Improve sell-through confidence scoring.
   - Account for expected snapshot interval and actual elapsed time between runs.
   - Down-weight repeated identical snapshots, API refresh gaps, and likely
     cancel/repost churn.
-  - Separate "disappeared listing" and "probable sale" confidence in output.
+  - Keep confidence conservative when disappearance evidence is ambiguous.
 
-- [ ] Add listing age and undercut tracking.
+- [x] Add listing age and undercut tracking.
   - Estimate how long a listing remains visible across repeated snapshots.
   - Track undercut counts and price changes per item between snapshots.
-  - Use age and undercut pressure as recommendation inputs.
+  - Expose age and undercut pressure for future recommendation inputs.
 
-- [ ] Add database maintenance commands.
+- [x] Add database maintenance commands.
   - Add `wow-auctions db stats` for table sizes and oldest/newest snapshot.
   - Add `wow-auctions db vacuum` for SQLite cleanup.
   - Add optional retention pruning for raw listings while preserving summaries

@@ -14,6 +14,8 @@ from wow_auction_tracker.storage import (
     BuyOpportunityObservationRecord,
     CraftOpportunityObservationRecord,
     FetchRun,
+    ItemAnomalyRecord,
+    ItemDailyMetricRecord,
     ItemHistoryMetricRecord,
     ItemMetadataRecord,
     ItemSummaryRecord,
@@ -224,6 +226,53 @@ def test_repository_stores_sell_through_metrics() -> None:
     assert metrics[0].probable_sold_average_unit_price == 100
     assert metrics[0].disappeared_quantity == 2
     assert metrics[0].sell_through_ratio_bps == 10000
+
+
+def test_repository_builds_daily_rollups_and_item_anomalies() -> None:
+    engine = create_db_engine("sqlite:///:memory:")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+
+    for price in (100, 105, 95):
+        run_id = repository.start_fetch_run(config)
+        listings = filter_auctions(
+            {"auctions": [{"id": run_id, "item": {"id": 210930}, "quantity": 20, "unit_price": price}]},
+            {210930},
+            Market.COMMODITY,
+        )
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+        )
+
+    run_id = repository.start_fetch_run(config)
+    listings = filter_auctions(
+        {"auctions": [{"id": 99, "item": {"id": 210930}, "quantity": 3, "unit_price": 200}]},
+        {210930},
+        Market.COMMODITY,
+    )
+    repository.complete_fetch_run(
+        run_id,
+        listings,
+        summarize_listings(listings),
+        calculate_item_history_metrics(listings),
+    )
+
+    with Session(engine) as session:
+        daily_metrics = session.scalars(select(ItemDailyMetricRecord)).all()
+        anomalies = session.scalars(select(ItemAnomalyRecord).order_by(ItemAnomalyRecord.anomaly_type)).all()
+
+    assert len(daily_metrics) == 1
+    assert daily_metrics[0].snapshot_count == 4
+    assert daily_metrics[0].low_unit_price == 95
+    assert daily_metrics[0].last_fetch_run_id == run_id
+    assert {anomaly.anomaly_type for anomaly in anomalies} == {"inventory_drought", "price_spike"}
+    assert all(anomaly.fetch_run_id == run_id for anomaly in anomalies)
 
 
 def test_repository_stores_buy_opportunity_observations() -> None:

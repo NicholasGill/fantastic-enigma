@@ -23,7 +23,12 @@ class SellThroughMetric:
     confidence: int
 
 
-def build_sell_through_metrics(observations: list[ListingObservation]) -> list[SellThroughMetric]:
+def build_sell_through_metrics(
+    observations: list[ListingObservation],
+    *,
+    elapsed_seconds: int | None = None,
+    expected_interval_seconds: int | None = None,
+) -> list[SellThroughMetric]:
     grouped: dict[tuple[int, str], list[ListingObservation]] = {}
     for observation in observations:
         grouped.setdefault((observation.item_id, observation.market), []).append(observation)
@@ -65,7 +70,11 @@ def build_sell_through_metrics(observations: list[ListingObservation]) -> list[S
                 observed_listing_count=len(observed_rows),
                 observed_quantity=observed_quantity,
                 sell_through_ratio=max(0.0, min(sell_through_ratio, 1.0)),
-                confidence=_confidence(observed_rows),
+                confidence=_confidence(
+                    observed_rows,
+                    elapsed_seconds=elapsed_seconds,
+                    expected_interval_seconds=expected_interval_seconds,
+                ),
             )
         )
 
@@ -90,10 +99,40 @@ def _probable_sold_unit_price(observation: ListingObservation) -> int | None:
     return observation.previous_unit_price or observation.unit_price
 
 
-def _confidence(observations: list[ListingObservation]) -> int:
+def _confidence(
+    observations: list[ListingObservation],
+    *,
+    elapsed_seconds: int | None,
+    expected_interval_seconds: int | None,
+) -> int:
     if not observations:
         return 0
 
     observed_count_score = min(len(observations) / 20, 1.0)
     auction_id_ratio = mean(1.0 if row.auction_id is not None else 0.0 for row in observations)
-    return round(((observed_count_score * 0.6) + (auction_id_ratio * 0.4)) * 100)
+    cadence_score = _cadence_score(elapsed_seconds, expected_interval_seconds)
+    churn_penalty = _churn_penalty(observations)
+    base = ((observed_count_score * 0.45) + (auction_id_ratio * 0.35) + (cadence_score * 0.20)) * 100
+    return round(max(0.0, base - churn_penalty))
+
+
+def _cadence_score(elapsed_seconds: int | None, expected_interval_seconds: int | None) -> float:
+    if elapsed_seconds is None or expected_interval_seconds is None or expected_interval_seconds <= 0:
+        return 0.5
+    ratio = elapsed_seconds / expected_interval_seconds
+    if 0.75 <= ratio <= 1.5:
+        return 1.0
+    if 0.5 <= ratio <= 2.5:
+        return 0.65
+    return 0.25
+
+
+def _churn_penalty(observations: list[ListingObservation]) -> int:
+    if not observations:
+        return 0
+    changed_rows = [row for row in observations if row.status == "changed"]
+    if not changed_rows:
+        return 0
+    changed_ratio = len(changed_rows) / len(observations)
+    undercut_pressure = mean(min(row.undercut_count / 10, 1.0) for row in observations)
+    return round(((changed_ratio * 0.7) + (undercut_pressure * 0.3)) * 25)

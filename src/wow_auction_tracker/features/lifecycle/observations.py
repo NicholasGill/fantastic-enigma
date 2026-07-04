@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable
 
 from wow_auction_tracker.auction import AuctionListing
 
@@ -16,6 +17,7 @@ class ListingSnapshot:
     buyout: int | None
     bid: int | None
     time_left: str | None
+    age_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,9 @@ class ListingObservation:
     time_left: str | None
     previous_time_left: str | None
     inferred_outcome: str | None = None
+    age_seconds: int | None = None
+    undercut_count: int = 0
+    unit_price_change: int | None = None
 
 
 def build_listing_observations(
@@ -49,11 +54,19 @@ def build_listing_observations(
         for listing in current_listings
     }
     previous_by_key = {listing.observation_key: listing for listing in previous_listings}
+    undercut_counts = _undercut_counts(current_by_key.values())
 
     observations: list[ListingObservation] = []
     for key, current in current_by_key.items():
         previous = previous_by_key.get(key)
-        observations.append(_current_observation(current, previous))
+        observations.append(
+            _current_observation(
+                current,
+                previous,
+                elapsed_seconds=elapsed_seconds,
+                undercut_count=undercut_counts.get(key, 0),
+            )
+        )
 
     for key, previous in previous_by_key.items():
         if key in current_by_key:
@@ -104,7 +117,13 @@ def _snapshot_from_listing(listing: AuctionListing) -> ListingSnapshot:
     )
 
 
-def _current_observation(current: ListingSnapshot, previous: ListingSnapshot | None) -> ListingObservation:
+def _current_observation(
+    current: ListingSnapshot,
+    previous: ListingSnapshot | None,
+    *,
+    elapsed_seconds: int | None,
+    undercut_count: int,
+) -> ListingObservation:
     if previous is None:
         status = "new"
     elif _listing_changed(current, previous):
@@ -129,6 +148,9 @@ def _current_observation(current: ListingSnapshot, previous: ListingSnapshot | N
         time_left=current.time_left,
         previous_time_left=previous.time_left if previous else None,
         inferred_outcome=_inferred_current_outcome(current, previous),
+        age_seconds=_age_seconds(previous, elapsed_seconds) if previous else 0,
+        undercut_count=undercut_count,
+        unit_price_change=_unit_price_change(current.unit_price, previous.unit_price if previous else None),
     )
 
 
@@ -150,6 +172,9 @@ def _missing_observation(previous: ListingSnapshot, elapsed_seconds: int | None)
         time_left=None,
         previous_time_left=previous.time_left,
         inferred_outcome=_inferred_missing_outcome(previous.time_left, elapsed_seconds),
+        age_seconds=_age_seconds(previous, elapsed_seconds),
+        undercut_count=0,
+        unit_price_change=None,
     )
 
 
@@ -169,6 +194,38 @@ def _inferred_current_outcome(current: ListingSnapshot, previous: ListingSnapsho
     if current.quantity < previous.quantity:
         return "probable_sold"
     return None
+
+
+def _age_seconds(previous: ListingSnapshot, elapsed_seconds: int | None) -> int | None:
+    if elapsed_seconds is None:
+        return previous.age_seconds
+    return (previous.age_seconds or 0) + elapsed_seconds
+
+
+def _unit_price_change(current_unit_price: int | None, previous_unit_price: int | None) -> int | None:
+    if current_unit_price is None or previous_unit_price is None:
+        return None
+    return current_unit_price - previous_unit_price
+
+
+def _undercut_counts(listings: Iterable[ListingSnapshot]) -> dict[str, int]:
+    by_item: dict[tuple[int, str], list[ListingSnapshot]] = {}
+    for listing in listings:
+        by_item.setdefault((listing.item_id, listing.market), []).append(listing)
+
+    counts: dict[str, int] = {}
+    for rows in by_item.values():
+        prices = [
+            row.unit_price
+            for row in rows
+            if row.unit_price is not None
+        ]
+        for row in rows:
+            if row.unit_price is None:
+                counts[row.observation_key] = 0
+            else:
+                counts[row.observation_key] = sum(1 for price in prices if price < row.unit_price)
+    return counts
 
 
 def _inferred_missing_outcome(previous_time_left: str | None, elapsed_seconds: int | None) -> str:

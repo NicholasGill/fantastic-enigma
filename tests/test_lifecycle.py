@@ -23,6 +23,25 @@ def test_build_listing_observations_marks_new_active_changed_and_missing() -> No
     assert outcomes[2] == "probable_sold"
 
 
+def test_build_listing_observations_tracks_age_undercuts_and_price_changes() -> None:
+    current = [
+        AuctionListing(1, 100, Market.COMMODITY, 5, 90, None, None, "LONG", {}),
+        AuctionListing(2, 100, Market.COMMODITY, 2, 120, None, None, "LONG", {}),
+    ]
+    previous = [
+        ListingSnapshot("auction:1", 1, 100, "commodity", 5, 100, None, None, "LONG", age_seconds=600),
+    ]
+
+    observations = build_listing_observations(current, previous, elapsed_seconds=300)
+    by_auction = {observation.auction_id: observation for observation in observations}
+
+    assert by_auction[1].age_seconds == 900
+    assert by_auction[1].unit_price_change == -10
+    assert by_auction[1].undercut_count == 0
+    assert by_auction[2].age_seconds == 0
+    assert by_auction[2].undercut_count == 1
+
+
 def test_build_listing_observations_labels_missing_listing_outcomes_from_elapsed_time() -> None:
     previous = [
         ListingSnapshot("auction:1", 1, 100, "commodity", 5, 100, None, None, "LONG"),

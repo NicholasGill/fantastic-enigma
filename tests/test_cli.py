@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from wow_auction_tracker.auction import AuctionListing, summarize_listings
+from wow_auction_tracker.auction import AuctionListing, calculate_item_history_metrics, summarize_listings
 from wow_auction_tracker.config import Market, TrackerConfig
 from wow_auction_tracker.cli import build_parser
 from wow_auction_tracker.cli import _database_size_label
@@ -46,6 +46,47 @@ def test_database_size_label_reports_sqlite_file_size(tmp_path: Path) -> None:
     db_path.write_bytes(b"x" * 2048)
 
     assert _database_size_label(f"sqlite:///{db_path}") == "2.0 KiB"
+
+
+def test_db_stats_command_prints_table_counts(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate({"items": [{"id": 210930, "market": "commodity"}]})
+    run_id = repository.start_fetch_run(config)
+    listings = [
+        AuctionListing(1, 210930, Market.COMMODITY, 2, 100, None, None, "LONG", {"id": 1, "item": {"id": 210930}})
+    ]
+    repository.complete_fetch_run(run_id, listings, summarize_listings(listings))
+
+    exit_code = main(["--database-url", f"sqlite:///{db_path}", "db", "stats"])
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Successful fetch runs: 1" in captured
+    assert "auction_listings: 1" in captured
+
+
+def test_db_prune_raw_listings_preserves_summary_rows(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate({"items": [{"id": 210930, "market": "commodity"}]})
+    run_id = repository.start_fetch_run(config)
+    listings = [
+        AuctionListing(1, 210930, Market.COMMODITY, 2, 100, None, None, "LONG", {"id": 1, "item": {"id": 210930}})
+    ]
+    repository.complete_fetch_run(run_id, listings, summarize_listings(listings))
+
+    exit_code = main(["--database-url", f"sqlite:///{db_path}", "db", "prune-raw-listings", "--before-days", "0"])
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Deleted 1 raw auction listings" in captured
+    assert repository.database_stats()["table_counts"]["auction_listings"] == 0
+    assert repository.database_stats()["table_counts"]["item_summaries"] == 1
 
 
 def test_format_file_size_uses_binary_units() -> None:
@@ -136,6 +177,33 @@ def test_report_crafts_command_prints_craft_signals(capsys: pytest.CaptureFixtur
     assert "Recipe" in captured
     assert "Refine Bismuth" in captured
     assert "Bismuth" in captured
+
+
+def test_report_anomalies_command_prints_recent_anomalies(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate({"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]})
+
+    for price in (100, 100, 100, 250):
+        run_id = repository.start_fetch_run(config)
+        listings = [
+            AuctionListing(run_id, 210930, Market.COMMODITY, 10, price, None, None, "LONG", {"id": run_id})
+        ]
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+        )
+
+    exit_code = main(["--database-url", f"sqlite:///{db_path}", "report", "anomalies", "--limit", "1"])
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "price_spike" in captured
+    assert "210930" in captured
 
 
 def test_export_latest_command_writes_csv(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:

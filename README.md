@@ -90,6 +90,12 @@ disappeared quantity, disappeared value, sell-through ratio, and confidence.
 This is an estimate only: missing listings may have sold, expired, been
 cancelled, or been reposted.
 
+Completed fetches also rebuild daily item rollups and flag unusual market
+events. Daily rollups preserve low, quartile, weighted-average, quantity,
+listing-count, disappeared-quantity, probable-sold, and demand-confidence
+signals for longer-range analysis. Anomaly rows flag price spikes, price
+crashes, and inventory droughts against recent item baselines.
+
 Show current item recommendations from stored snapshot history:
 
 ```bash
@@ -100,6 +106,12 @@ Show profitable craft signals from the latest snapshot:
 
 ```bash
 uv run wow-auctions report crafts --limit 10
+```
+
+Show recent price and inventory anomalies:
+
+```bash
+uv run wow-auctions report anomalies --limit 10
 ```
 
 Import companion addon SavedVariables after copying or pointing at the game
@@ -140,6 +152,18 @@ uv run wow-auctions export recommendations --limit 10
 uv run wow-auctions export crafts --output craft-signals.csv
 uv run wow-auctions export player-performance --days 30 --output player-performance.csv
 ```
+
+Inspect and maintain the local SQLite database:
+
+```bash
+uv run wow-auctions db stats
+uv run wow-auctions db vacuum
+uv run wow-auctions db prune-raw-listings --before-days 30
+```
+
+Raw listing pruning deletes old `auction_listings` rows only. Summaries,
+history metrics, sell-through metrics, daily rollups, opportunities, and player
+data are preserved.
 
 Recommendations are conservative estimates based on current price versus recent
 median price, inferred sell-through, recent quantity drops, listing scarcity,
