@@ -510,6 +510,11 @@ def test_dashboard_profit_loss_does_not_count_sales_without_cost_as_profit(tmp_p
     engine = create_db_engine(f"sqlite:///{db_path}")
     init_db(engine)
     repository = AuctionRepository(engine)
+    repository.start_fetch_run(
+        TrackerConfig.model_validate(
+            {"items": [{"id": 219946, "name": "Storm Dust", "market": "commodity"}]}
+        )
+    )
     repository.import_addon_data(
         AddonImportResult(
             source_path=tmp_path / "WowAuctionTracker.lua",
@@ -548,6 +553,11 @@ def test_dashboard_profit_loss_counts_open_purchases_as_negative_profit(tmp_path
     engine = create_db_engine(f"sqlite:///{db_path}")
     init_db(engine)
     repository = AuctionRepository(engine)
+    repository.start_fetch_run(
+        TrackerConfig.model_validate(
+            {"items": [{"id": 219946, "name": "Storm Dust", "market": "commodity"}]}
+        )
+    )
     repository.import_addon_data(
         AddonImportResult(
             source_path=tmp_path / "WowAuctionTracker.lua",
@@ -588,6 +598,11 @@ def test_dashboard_profit_loss_dedupes_reimported_sale_rows(tmp_path: Path) -> N
     engine = create_db_engine(f"sqlite:///{db_path}")
     init_db(engine)
     repository = AuctionRepository(engine)
+    repository.start_fetch_run(
+        TrackerConfig.model_validate(
+            {"items": [{"id": 219946, "name": "Storm Dust", "market": "commodity"}]}
+        )
+    )
     sale = PlayerAuctionOutcome(
         observed_at=datetime(2026, 7, 1, 5, 30, tzinfo=UTC),
         character="Arces",
@@ -636,6 +651,86 @@ def test_dashboard_profit_loss_dedupes_reimported_sale_rows(tmp_path: Path) -> N
 
     assert activity["profit_loss"]["summary"]["revenue"] == 86000
     assert activity["profit_loss"]["summary"]["sale_count"] == 1
+
+
+def test_dashboard_profit_loss_excludes_untracked_addon_items(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    repository.start_fetch_run(
+        TrackerConfig.model_validate(
+            {"items": [{"id": 219946, "name": "Storm Dust", "market": "commodity"}]}
+        )
+    )
+    repository.import_addon_data(
+        AddonImportResult(
+            source_path=tmp_path / "WowAuctionTracker.lua",
+            addon_version=1,
+            posts=[],
+            outcomes=[
+                PlayerAuctionOutcome(
+                    observed_at=datetime(2026, 7, 1, 5, 30, tzinfo=UTC),
+                    character="Arces",
+                    realm="Dalaran",
+                    mail_index=1,
+                    item_id=219946,
+                    item_name="Storm Dust",
+                    item_count=1000,
+                    outcome="sold",
+                    money=86000,
+                    raw={"outcome": "sold"},
+                ),
+                PlayerAuctionOutcome(
+                    observed_at=datetime(2026, 7, 1, 5, 31, tzinfo=UTC),
+                    character="Arces",
+                    realm="Dalaran",
+                    mail_index=2,
+                    item_id=210810,
+                    item_name="Arathor's Spear",
+                    item_count=10,
+                    outcome="sold",
+                    money=50000,
+                    raw={"outcome": "sold"},
+                ),
+            ],
+            purchases=[
+                PlayerAuctionPurchase(
+                    observed_at=datetime(2026, 7, 1, 5, 20, tzinfo=UTC),
+                    event_type="commodity_purchase_succeeded",
+                    character="Arces",
+                    realm="Dalaran",
+                    market="commodity",
+                    auction_id=None,
+                    item_id=219946,
+                    quantity=100,
+                    unit_price=80,
+                    total_price=8000,
+                    raw={"event_type": "commodity_purchase_succeeded"},
+                ),
+                PlayerAuctionPurchase(
+                    observed_at=datetime(2026, 7, 1, 5, 21, tzinfo=UTC),
+                    event_type="commodity_purchase_succeeded",
+                    character="Arces",
+                    realm="Dalaran",
+                    market="commodity",
+                    auction_id=None,
+                    item_id=210810,
+                    quantity=10,
+                    unit_price=1000,
+                    total_price=10000,
+                    raw={"event_type": "commodity_purchase_succeeded"},
+                ),
+            ],
+        )
+    )
+
+    activity = DashboardDataStore(f"sqlite:///{db_path}").overview()["player_activity"]
+
+    assert activity["profit_loss"]["summary"]["revenue"] == 86000
+    assert activity["profit_loss"]["summary"]["cost"] == 8000
+    assert activity["profit_loss"]["summary"]["net_profit"] == 78000
+    assert [item["item_id"] for item in activity["profit_loss"]["items"]] == [219946]
 
 
 def test_format_file_size() -> None:

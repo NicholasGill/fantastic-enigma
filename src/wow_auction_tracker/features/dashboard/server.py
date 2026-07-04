@@ -718,20 +718,20 @@ def _player_profit_loss(connection: sqlite3.Connection) -> dict[str, Any]:
                 o.character,
                 o.realm,
                 coalesce(o.item_id, m.item_id) as item_id,
-                coalesce(md.name, o.item_name, t.name, 'Item ' || coalesce(o.item_id, m.item_id)) as name,
+                coalesce(md.name, t.name, o.item_name, 'Item ' || coalesce(o.item_id, m.item_id)) as name,
                 o.item_count,
                 o.money
             from player_auction_outcomes o
             left join player_auction_matches m on m.outcome_id = o.id
             left join item_metadata md on md.item_id = coalesce(o.item_id, m.item_id)
-            left join tracked_items t on t.item_id = coalesce(o.item_id, m.item_id)
+            join tracked_items t on t.item_id = coalesce(o.item_id, m.item_id)
             where o.outcome = 'sold'
             group by
                 o.observed_at,
                 o.character,
                 o.realm,
                 coalesce(o.item_id, m.item_id),
-                coalesce(md.name, o.item_name, t.name),
+                coalesce(md.name, t.name, o.item_name),
                 o.item_count,
                 o.money
         )
@@ -755,7 +755,7 @@ def _player_profit_loss(connection: sqlite3.Connection) -> dict[str, Any]:
             coalesce(sum(p.total_price), 0) as cost
         from player_auction_purchases p
         left join item_metadata md on md.item_id = p.item_id
-        left join tracked_items t on t.item_id = p.item_id
+        join tracked_items t on t.item_id = p.item_id
         where p.event_type in ('auction_purchase_completed', 'commodity_purchase_succeeded')
         group by p.item_id, coalesce(md.name, t.name)
         """
