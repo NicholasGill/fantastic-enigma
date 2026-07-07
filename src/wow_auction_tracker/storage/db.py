@@ -32,6 +32,7 @@ from wow_auction_tracker.features.metadata import ItemMetadata
 from wow_auction_tracker.features.opportunities import BuyOpportunityObservation
 from wow_auction_tracker.features.player import (
     AddonImportResult,
+    PlayerGoldSnapshot,
     PlayerAuctionOutcome,
     PlayerAuctionPost,
     PlayerAuctionPurchase,
@@ -78,6 +79,7 @@ class AddonImportRecord(Base):
     owned_snapshot_count: Mapped[int] = mapped_column(Integer, nullable=False)
     mail_event_count: Mapped[int] = mapped_column(Integer, nullable=False)
     purchase_event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    gold_snapshot_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     inserted_row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     skipped_duplicate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     malformed_row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -85,6 +87,7 @@ class AddonImportRecord(Base):
     posts: Mapped[list[PlayerAuctionPostRecord]] = relationship(back_populates="import_record")
     outcomes: Mapped[list[PlayerAuctionOutcomeRecord]] = relationship(back_populates="import_record")
     purchases: Mapped[list[PlayerAuctionPurchaseRecord]] = relationship(back_populates="import_record")
+    gold_snapshots: Mapped[list[PlayerGoldSnapshotRecord]] = relationship(back_populates="import_record")
 
 
 class TrackedItemRecord(Base):
@@ -383,6 +386,22 @@ class PlayerAuctionMatchRecord(Base):
     confidence: Mapped[int] = mapped_column(Integer, nullable=False)
     elapsed_seconds: Mapped[int | None] = mapped_column(Integer)
     matched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PlayerGoldSnapshotRecord(Base):
+    __tablename__ = "player_gold_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    addon_import_id: Mapped[int] = mapped_column(ForeignKey("addon_imports.id"), nullable=False, index=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    reason: Mapped[str | None] = mapped_column(String(64))
+    character: Mapped[str | None] = mapped_column(String(128), index=True)
+    realm: Mapped[str | None] = mapped_column(String(128), index=True)
+    money: Mapped[int | None] = mapped_column(Integer)
+    row_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    raw_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+    import_record: Mapped[AddonImportRecord] = relationship(back_populates="gold_snapshots")
 
 
 def create_db_engine(database_url: str) -> Engine:
@@ -844,6 +863,11 @@ class AuctionRepository:
                             PlayerAuctionPurchaseRecord.addon_import_id.in_(existing_import_ids)
                         )
                     )
+                    session.execute(
+                        delete(PlayerGoldSnapshotRecord).where(
+                            PlayerGoldSnapshotRecord.addon_import_id.in_(existing_import_ids)
+                        )
+                    )
                     session.execute(delete(PlayerAuctionMatchRecord))
                     session.execute(
                         delete(AddonImportRecord).where(AddonImportRecord.id.in_(existing_import_ids))
@@ -869,7 +893,15 @@ class AuctionRepository:
                         )
                     ).all()
                 ),
+                "gold": set(
+                    session.scalars(
+                        select(PlayerGoldSnapshotRecord.row_hash).where(
+                            PlayerGoldSnapshotRecord.row_hash.is_not(None)
+                        )
+                    ).all()
+                ),
             }
+            gold_snapshots = result.gold_snapshots or []
 
             import_record = AddonImportRecord(
                 imported_at=datetime.now(UTC),
@@ -878,6 +910,7 @@ class AuctionRepository:
                 owned_snapshot_count=len(result.posts),
                 mail_event_count=len(result.outcomes),
                 purchase_event_count=len(result.purchases),
+                gold_snapshot_count=len(gold_snapshots),
                 inserted_row_count=0,
                 skipped_duplicate_count=0,
                 malformed_row_count=result.malformed_row_count,
@@ -964,6 +997,26 @@ class AuctionRepository:
                     )
                 )
 
+            for snapshot in gold_snapshots:
+                snapshot_hash = _gold_snapshot_row_hash(snapshot)
+                if snapshot_hash in existing_hashes["gold"]:
+                    skipped_duplicate_count += 1
+                    continue
+                existing_hashes["gold"].add(snapshot_hash)
+                inserted_row_count += 1
+                session.add(
+                    PlayerGoldSnapshotRecord(
+                        addon_import_id=import_record.id,
+                        observed_at=snapshot.observed_at,
+                        reason=snapshot.reason,
+                        character=snapshot.character,
+                        realm=snapshot.realm,
+                        money=snapshot.money,
+                        row_hash=snapshot_hash,
+                        raw_json=json.dumps(snapshot.raw, sort_keys=True),
+                    )
+                )
+
             import_record.inserted_row_count = inserted_row_count
             import_record.skipped_duplicate_count = skipped_duplicate_count
             session.flush()
@@ -987,6 +1040,7 @@ class AuctionRepository:
             PlayerAuctionPostRecord,
             PlayerAuctionOutcomeRecord,
             PlayerAuctionPurchaseRecord,
+            PlayerGoldSnapshotRecord,
             PlayerAuctionMatchRecord,
         ]
         with Session(self.engine) as session:
@@ -1301,6 +1355,19 @@ def _purchase_row_hash(purchase: PlayerAuctionPurchase) -> str:
     )
 
 
+def _gold_snapshot_row_hash(snapshot: PlayerGoldSnapshot) -> str:
+    return row_hash(
+        "gold",
+        {
+            "observed_at": snapshot.observed_at.isoformat() if snapshot.observed_at else None,
+            "reason": snapshot.reason,
+            "character": snapshot.character,
+            "realm": snapshot.realm,
+            "money": snapshot.money,
+        },
+    )
+
+
 def _best_post_for_outcome(
     session: Session,
     outcome: PlayerAuctionOutcomeRecord,
@@ -1558,6 +1625,7 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
                 owned_snapshot_count integer not null,
                 mail_event_count integer not null,
                 purchase_event_count integer not null default 0,
+                gold_snapshot_count integer not null default 0,
                 inserted_row_count integer not null default 0,
                 skipped_duplicate_count integer not null default 0,
                 malformed_row_count integer not null default 0
@@ -1569,6 +1637,7 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
             "addon_imports",
             {
                 "purchase_event_count": "integer not null default 0",
+                "gold_snapshot_count": "integer not null default 0",
                 "inserted_row_count": "integer not null default 0",
                 "skipped_duplicate_count": "integer not null default 0",
                 "malformed_row_count": "integer not null default 0",
@@ -1639,9 +1708,26 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
             )
             """
         )
+        connection.exec_driver_sql(
+            """
+            create table if not exists player_gold_snapshots (
+                id integer primary key,
+                addon_import_id integer not null,
+                observed_at datetime,
+                reason varchar(64),
+                character varchar(128),
+                realm varchar(128),
+                money integer,
+                row_hash varchar(64),
+                raw_json text not null,
+                foreign key(addon_import_id) references addon_imports (id)
+            )
+            """
+        )
         _ensure_sqlite_columns(connection, "player_auction_posts", {"row_hash": "varchar(64)"})
         _ensure_sqlite_columns(connection, "player_auction_outcomes", {"row_hash": "varchar(64)"})
         _ensure_sqlite_columns(connection, "player_auction_purchases", {"row_hash": "varchar(64)"})
+        _ensure_sqlite_columns(connection, "player_gold_snapshots", {"row_hash": "varchar(64)"})
         connection.exec_driver_sql(
             """
             create table if not exists player_auction_matches (
@@ -1684,6 +1770,11 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
             ("player_auction_purchases", "auction_id"),
             ("player_auction_purchases", "item_id"),
             ("player_auction_purchases", "row_hash"),
+            ("player_gold_snapshots", "addon_import_id"),
+            ("player_gold_snapshots", "observed_at"),
+            ("player_gold_snapshots", "character"),
+            ("player_gold_snapshots", "realm"),
+            ("player_gold_snapshots", "row_hash"),
             ("player_auction_matches", "outcome_id"),
             ("player_auction_matches", "post_id"),
             ("player_auction_matches", "item_id"),

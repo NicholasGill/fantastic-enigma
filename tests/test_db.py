@@ -25,6 +25,7 @@ from wow_auction_tracker.storage import (
     PlayerAuctionOutcomeRecord,
     PlayerAuctionPostRecord,
     PlayerAuctionPurchaseRecord,
+    PlayerGoldSnapshotRecord,
     SellThroughMetricRecord,
     TrackedItemRecord,
     create_db_engine,
@@ -445,6 +446,15 @@ def test_repository_imports_player_addon_rows(tmp_path) -> None:
               ["total_price"] = 45000,
             },
           },
+          ["gold_snapshots"] = {
+            {
+              ["observed_at"] = 1710000900,
+              ["reason"] = "player_money",
+              ["character"] = "Alice",
+              ["realm"] = "Dalaran",
+              ["money"] = 123456789,
+            },
+          },
         }
         """,
         encoding="utf-8",
@@ -459,6 +469,7 @@ def test_repository_imports_player_addon_rows(tmp_path) -> None:
         posts = session.scalars(select(PlayerAuctionPostRecord)).all()
         outcomes = session.scalars(select(PlayerAuctionOutcomeRecord)).all()
         purchases = session.scalars(select(PlayerAuctionPurchaseRecord)).all()
+        gold_snapshots = session.scalars(select(PlayerGoldSnapshotRecord)).all()
 
     assert import_id == 1
     assert len(posts) == 1
@@ -468,6 +479,8 @@ def test_repository_imports_player_addon_rows(tmp_path) -> None:
     assert outcomes[0].money == 45000
     assert len(purchases) == 1
     assert purchases[0].event_type == "commodity_purchase_succeeded"
+    assert len(gold_snapshots) == 1
+    assert gold_snapshots[0].money == 123456789
     assert purchases[0].total_price == 45000
 
     second_import_id = repository.import_addon_data(import_saved_variables(saved_variables))
@@ -476,16 +489,18 @@ def test_repository_imports_player_addon_rows(tmp_path) -> None:
         posts = session.scalars(select(PlayerAuctionPostRecord)).all()
         outcomes = session.scalars(select(PlayerAuctionOutcomeRecord)).all()
         purchases = session.scalars(select(PlayerAuctionPurchaseRecord)).all()
+        gold_snapshots = session.scalars(select(PlayerGoldSnapshotRecord)).all()
         matches = session.scalars(select(PlayerAuctionMatchRecord)).all()
 
     assert second_import_id == 2
-    assert imports[0].inserted_row_count == 3
+    assert imports[0].inserted_row_count == 4
     assert imports[0].skipped_duplicate_count == 0
     assert imports[1].inserted_row_count == 0
-    assert imports[1].skipped_duplicate_count == 3
+    assert imports[1].skipped_duplicate_count == 4
     assert len(posts) == 1
     assert len(outcomes) == 1
     assert len(purchases) == 1
+    assert len(gold_snapshots) == 1
     assert len(matches) == 1
     assert matches[0].outcome == "sold"
     assert matches[0].elapsed_seconds == 300

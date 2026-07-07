@@ -126,6 +126,7 @@ class DashboardDataStore:
                 "counts": self._table_counts(connection),
                 "latest_run": dict(latest_run) if latest_run else None,
                 "recent_runs": self._recent_runs(connection),
+                "snapshots": self._snapshot_overview(connection, latest_run["id"] if latest_run else None),
                 "items": items,
                 "latest_lifecycle": self._latest_lifecycle(connection, latest_run["id"] if latest_run else None),
                 "recommendations": recommendations,
@@ -194,6 +195,7 @@ class DashboardDataStore:
             "owned_snapshot_count": len(result.posts),
             "mail_event_count": len(result.outcomes),
             "purchase_event_count": len(result.purchases),
+            "gold_snapshot_count": len(result.gold_snapshots or []),
             "inserted_row_count": int(import_row["inserted_row_count"]) if import_row else 0,
             "skipped_duplicate_count": int(import_row["skipped_duplicate_count"]) if import_row else 0,
             "malformed_row_count": int(import_row["malformed_row_count"]) if import_row else result.malformed_row_count,
@@ -248,6 +250,7 @@ class DashboardDataStore:
             "player_auction_posts",
             "player_auction_outcomes",
             "player_auction_purchases",
+            "player_gold_snapshots",
         )
         return {
             table: int(connection.execute(f"select count(*) from {table}").fetchone()[0])
@@ -263,18 +266,69 @@ class DashboardDataStore:
                 r.started_at,
                 r.finished_at,
                 r.status,
+                r.region,
+                r.locale,
                 r.connected_realm_id,
-                count(distinct l.id) as listing_count,
-                count(distinct s.id) as summary_count
+                r.expected_interval_seconds,
+                r.error,
+                (select count(*) from auction_listings l where l.fetch_run_id = r.id) as listing_count,
+                (select count(*) from item_summaries s where s.fetch_run_id = r.id) as summary_count,
+                (
+                    select coalesce(sum(s.total_quantity), 0)
+                    from item_summaries s
+                    where s.fetch_run_id = r.id
+                ) as total_quantity
             from fetch_runs r
-            left join auction_listings l on l.fetch_run_id = r.id
-            left join item_summaries s on s.fetch_run_id = r.id
-            group by r.id
             order by r.id desc
             limit 12
             """
         ).fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _snapshot_overview(connection: sqlite3.Connection, latest_run_id: int | None) -> dict[str, Any]:
+        if latest_run_id is None:
+            return {
+                "latest": None,
+                "lifecycle": {},
+                "sell_through": {
+                    "item_count": 0,
+                    "disappeared_quantity": 0,
+                    "probable_sold_quantity": 0,
+                    "average_sell_through_ratio_bps": None,
+                },
+            }
+
+        latest = connection.execute(
+            """
+            select
+                count(*) as item_count,
+                coalesce(sum(listing_count), 0) as listing_count,
+                coalesce(sum(total_quantity), 0) as total_quantity,
+                min(min_unit_price) as lowest_unit_price,
+                avg(median_unit_price) as average_median_unit_price
+            from item_summaries
+            where fetch_run_id = ?
+            """,
+            (latest_run_id,),
+        ).fetchone()
+        sell_through = connection.execute(
+            """
+            select
+                count(*) as item_count,
+                coalesce(sum(disappeared_quantity), 0) as disappeared_quantity,
+                coalesce(sum(probable_sold_quantity), 0) as probable_sold_quantity,
+                avg(sell_through_ratio_bps) as average_sell_through_ratio_bps
+            from sell_through_metrics
+            where fetch_run_id = ?
+            """,
+            (latest_run_id,),
+        ).fetchone()
+        return {
+            "latest": dict(latest) if latest else None,
+            "lifecycle": DashboardDataStore._latest_lifecycle(connection, latest_run_id),
+            "sell_through": dict(sell_through) if sell_through else {},
+        }
 
     @staticmethod
     def _latest_lifecycle(connection: sqlite3.Connection, latest_run_id: int | None) -> dict[str, int]:
@@ -420,6 +474,7 @@ class DashboardDataStore:
                 owned_snapshot_count,
                 mail_event_count,
                 purchase_event_count,
+                gold_snapshot_count,
                 inserted_row_count,
                 skipped_duplicate_count,
                 malformed_row_count
@@ -554,6 +609,7 @@ class DashboardDataStore:
             "buy_opportunities": [dict(row) for row in buy_opportunities],
             "performance": _player_performance(connection),
             "profit_loss": _player_profit_loss(connection, tracked_item_ids=self.tracked_item_ids),
+            "gold": _player_gold(connection),
         }
 
 
@@ -571,6 +627,7 @@ def create_dashboard_app(config: DashboardConfig) -> Flask:
     @app.get("/profit-loss")
     @app.get("/market")
     @app.get("/stats")
+    @app.get("/snapshots")
     def _index() -> Response:
         return Response(DASHBOARD_HTML, mimetype="text/html")
 
@@ -709,11 +766,46 @@ def _player_performance(connection: sqlite3.Connection, *, window_days: int | No
     return performance
 
 
+def _player_gold(connection: sqlite3.Connection) -> dict[str, Any]:
+    rows = connection.execute(
+        """
+        select
+            observed_at,
+            reason,
+            character,
+            realm,
+            money
+        from player_gold_snapshots
+        where money is not null
+        order by observed_at desc, id desc
+        limit 100
+        """
+    ).fetchall()
+    history = [dict(row) for row in reversed(rows)]
+    if not history:
+        return {
+            "latest": None,
+            "first": None,
+            "delta": None,
+            "history": [],
+        }
+
+    first = history[0]
+    latest = history[-1]
+    return {
+        "latest": latest,
+        "first": first,
+        "delta": int(latest["money"]) - int(first["money"]),
+        "history": history,
+    }
+
+
 def _player_profit_loss(
     connection: sqlite3.Connection,
     *,
     tracked_item_ids: frozenset[int] | None = None,
 ) -> dict[str, Any]:
+    item_names = _profit_loss_item_names(connection, tracked_item_ids=tracked_item_ids)
     sale_rows = connection.execute(
         """
         with canonical_sales as (
@@ -729,7 +821,7 @@ def _player_profit_loss(
             from player_auction_outcomes o
             left join player_auction_matches m on m.outcome_id = o.id
             left join item_metadata md on md.item_id = coalesce(o.item_id, m.item_id)
-            join tracked_items t on t.item_id = coalesce(o.item_id, m.item_id)
+            left join tracked_items t on t.item_id = coalesce(o.item_id, m.item_id)
             where o.outcome = 'sold'
             group by
                 o.observed_at,
@@ -760,7 +852,7 @@ def _player_profit_loss(
             coalesce(sum(p.total_price), 0) as cost
         from player_auction_purchases p
         left join item_metadata md on md.item_id = p.item_id
-        join tracked_items t on t.item_id = p.item_id
+        left join tracked_items t on t.item_id = p.item_id
         where p.event_type in ('auction_purchase_completed', 'commodity_purchase_succeeded')
         group by p.item_id, coalesce(md.name, t.name)
         """
@@ -769,12 +861,13 @@ def _player_profit_loss(
     rows_by_key: dict[str, dict[str, Any]] = {}
     for row in sale_rows:
         item = dict(row)
-        if not _is_configured_profit_loss_item(item.get("item_id"), tracked_item_ids):
+        identity = _profit_loss_identity(item.get("item_id"), item.get("name"), item_names)
+        if identity is None:
             continue
-        key = _profit_loss_key(item.get("item_id"), item.get("name"))
+        key, item_id, name = identity
         rows_by_key[key] = {
-            "item_id": item.get("item_id"),
-            "name": item.get("name") or "Unknown",
+            "item_id": item_id,
+            "name": name,
             "sale_count": int(item.get("sale_count") or 0),
             "sold_quantity": int(item.get("sold_quantity") or 0),
             "revenue": int(item.get("revenue") or 0),
@@ -785,14 +878,15 @@ def _player_profit_loss(
 
     for row in purchase_rows:
         item = dict(row)
-        if not _is_configured_profit_loss_item(item.get("item_id"), tracked_item_ids):
+        identity = _profit_loss_identity(item.get("item_id"), item.get("name"), item_names)
+        if identity is None:
             continue
-        key = _profit_loss_key(item.get("item_id"), item.get("name"))
+        key, item_id, name = identity
         target = rows_by_key.setdefault(
             key,
             {
-                "item_id": item.get("item_id"),
-                "name": item.get("name") or "Unknown",
+                "item_id": item_id,
+                "name": name,
                 "sale_count": 0,
                 "sold_quantity": 0,
                 "revenue": 0,
@@ -870,10 +964,62 @@ def _is_configured_profit_loss_item(item_id: object, tracked_item_ids: frozenset
     return parsed_item_id in tracked_item_ids
 
 
-def _profit_loss_key(item_id: object, name: object) -> str:
-    if item_id is not None:
-        return f"id:{item_id}"
-    return f"name:{str(name or 'unknown').strip().lower()}"
+def _profit_loss_item_names(
+    connection: sqlite3.Connection,
+    *,
+    tracked_item_ids: frozenset[int] | None,
+) -> dict[str, dict[str, Any]]:
+    rows = connection.execute(
+        """
+        select t.item_id, coalesce(m.name, t.name) as name
+        from tracked_items t
+        left join item_metadata m on m.item_id = t.item_id
+        where coalesce(m.name, t.name) is not null
+        order by t.item_id
+        """
+    ).fetchall()
+    names: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        item_id = int(row["item_id"])
+        if not _is_configured_profit_loss_item(item_id, tracked_item_ids):
+            continue
+        name = str(row["name"])
+        key = _item_name_key(name)
+        entry = names.setdefault(key, {"name": name, "item_ids": set()})
+        entry["item_ids"].add(item_id)
+    return names
+
+
+def _profit_loss_identity(
+    item_id: object,
+    name: object,
+    item_names: dict[str, dict[str, Any]],
+) -> tuple[str, int | None, str] | None:
+    parsed_item_id: int | None
+    try:
+        parsed_item_id = int(item_id) if item_id is not None else None
+    except (TypeError, ValueError):
+        parsed_item_id = None
+
+    name_value = str(name).strip() if name is not None else ""
+    name_key = _item_name_key(name_value) if name_value else ""
+    name_entry = item_names.get(name_key) if name_key else None
+    if name_entry is not None:
+        item_ids = set(name_entry["item_ids"])
+        if parsed_item_id is not None and parsed_item_id not in item_ids:
+            return None
+        display_name = str(name_entry["name"])
+        if len(item_ids) == 1:
+            resolved_item_id = next(iter(item_ids))
+            return (f"id:{resolved_item_id}", resolved_item_id, display_name)
+        return (f"name:{name_key}", None, display_name)
+
+    if parsed_item_id is None:
+        return None
+    for entry in item_names.values():
+        if parsed_item_id in entry["item_ids"]:
+            return (f"id:{parsed_item_id}", parsed_item_id, name_value or str(entry["name"]))
+    return None
 
 
 def _item_ids_by_name_and_sold_quantity(connection: sqlite3.Connection) -> dict[tuple[str, int], int]:
@@ -1546,6 +1692,7 @@ DASHBOARD_HTML = """<!doctype html>
   <nav class="top-tabs">
     <div class="tab-list" role="tablist" aria-label="Dashboard views">
       <button class="tab-button active" id="market-tab" type="button" role="tab" aria-selected="true" aria-controls="market-panel" data-tab="market">Market</button>
+      <button class="tab-button" id="snapshots-tab" type="button" role="tab" aria-selected="false" aria-controls="snapshots-panel" data-tab="snapshots">Snapshots</button>
       <button class="tab-button" id="stats-tab" type="button" role="tab" aria-selected="false" aria-controls="stats-panel" data-tab="stats">Fetch Stats</button>
       <button class="tab-button" id="player-tab" type="button" role="tab" aria-selected="false" aria-controls="player-panel" data-tab="player">My Auctions</button>
       <button class="tab-button" id="profit-tab" type="button" role="tab" aria-selected="false" aria-controls="profit-panel" data-tab="profit">Profit / Loss</button>
@@ -1619,6 +1766,43 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
     </div>
 
+    <div class="tab-panel" id="snapshots-panel" role="tabpanel" aria-labelledby="snapshots-tab" data-panel="snapshots">
+      <div class="grid">
+        <div class="metric"><span>Latest Snapshot</span><strong id="snapshot-latest">-</strong></div>
+        <div class="metric"><span>Snapshot Items</span><strong id="snapshot-items">-</strong></div>
+        <div class="metric"><span>Snapshot Listings</span><strong id="snapshot-listings">-</strong></div>
+        <div class="metric"><span>Snapshot Quantity</span><strong id="snapshot-quantity">-</strong></div>
+        <div class="metric"><span>Lowest Unit</span><strong id="snapshot-lowest">-</strong></div>
+        <div class="metric"><span>Disappeared Qty</span><strong id="snapshot-disappeared">-</strong></div>
+        <div class="metric"><span>Probable Sold Qty</span><strong id="snapshot-probable-sold">-</strong></div>
+        <div class="metric"><span>Avg Sell-through</span><strong id="snapshot-sell-through">-</strong></div>
+      </div>
+      <section>
+        <div class="section-head">
+          <h2>Snapshot Runs</h2>
+          <span class="muted" id="snapshot-note">-</span>
+        </div>
+        <div class="mini-table-wrap">
+          <table class="mini-table">
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>Status</th>
+                <th>Started</th>
+                <th>Finished</th>
+                <th>Realm</th>
+                <th>Items</th>
+                <th>Listings</th>
+                <th>Quantity</th>
+                <th>Interval</th>
+              </tr>
+            </thead>
+            <tbody id="snapshot-runs-table"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
     <div class="tab-panel" id="stats-panel" role="tabpanel" aria-labelledby="stats-tab" data-panel="stats">
       <div class="grid">
         <div class="metric"><span>Database</span><strong id="db-size">-</strong></div>
@@ -1644,6 +1828,8 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="metric"><span>Gross Sales</span><strong id="pl-revenue">-</strong></div>
         <div class="metric"><span>Purchase Spend</span><strong id="pl-cost">-</strong></div>
         <div class="metric"><span>Margin</span><strong id="pl-margin">-</strong></div>
+        <div class="metric"><span>Wallet Change</span><strong id="gold-delta">-</strong></div>
+        <div class="metric"><span>Current Gold</span><strong id="gold-latest">-</strong></div>
       </div>
       <section>
         <div class="section-head">
@@ -1765,10 +1951,22 @@ DASHBOARD_HTML = """<!doctype html>
       myBuys: document.getElementById('my-buys'),
       buySignals: document.getElementById('buy-signals'),
       craftSignals: document.getElementById('craft-signals'),
+      snapshotLatest: document.getElementById('snapshot-latest'),
+      snapshotItems: document.getElementById('snapshot-items'),
+      snapshotListings: document.getElementById('snapshot-listings'),
+      snapshotQuantity: document.getElementById('snapshot-quantity'),
+      snapshotLowest: document.getElementById('snapshot-lowest'),
+      snapshotDisappeared: document.getElementById('snapshot-disappeared'),
+      snapshotProbableSold: document.getElementById('snapshot-probable-sold'),
+      snapshotSellThrough: document.getElementById('snapshot-sell-through'),
+      snapshotNote: document.getElementById('snapshot-note'),
+      snapshotRunsTable: document.getElementById('snapshot-runs-table'),
       plNet: document.getElementById('pl-net'),
       plRevenue: document.getElementById('pl-revenue'),
       plCost: document.getElementById('pl-cost'),
       plMargin: document.getElementById('pl-margin'),
+      goldDelta: document.getElementById('gold-delta'),
+      goldLatest: document.getElementById('gold-latest'),
       plNote: document.getElementById('pl-note'),
       profitLossTable: document.getElementById('profit-loss-table'),
       latestTime: document.getElementById('latest-time'),
@@ -1816,6 +2014,13 @@ DASHBOARD_HTML = """<!doctype html>
     function margin(value) {
       if (value === null || value === undefined) return '-';
       return bps(value);
+    }
+
+    function intervalLabel(seconds) {
+      if (seconds === null || seconds === undefined) return '-';
+      const minutes = Math.round(Number(seconds) / 60);
+      if (!minutes) return `${integer(seconds)}s`;
+      return `${integer(minutes)}m`;
     }
 
     function qualityLabel(value) {
@@ -1932,6 +2137,7 @@ DASHBOARD_HTML = """<!doctype html>
       renderItems();
       renderRecommendations();
       renderCraftSignals();
+      renderSnapshots();
       renderPlayerActivity();
       renderProfitLoss();
       renderRuns();
@@ -1984,6 +2190,39 @@ DASHBOARD_HTML = """<!doctype html>
           <span class="muted">${integer(run.listing_count)} listings</span>
         </div>`;
       }).join('');
+    }
+
+    function renderSnapshots() {
+      const snapshots = overview.snapshots || {};
+      const latest = snapshots.latest || {};
+      const sellThrough = snapshots.sell_through || {};
+      const latestRun = overview.latest_run;
+      els.snapshotLatest.textContent = latestRun ? `#${latestRun.id}` : '-';
+      els.snapshotItems.textContent = integer(latest.item_count);
+      els.snapshotListings.textContent = integer(latest.listing_count);
+      els.snapshotQuantity.textContent = integer(latest.total_quantity);
+      els.snapshotLowest.textContent = gold(latest.lowest_unit_price);
+      els.snapshotDisappeared.textContent = integer(sellThrough.disappeared_quantity);
+      els.snapshotProbableSold.textContent = integer(sellThrough.probable_sold_quantity);
+      els.snapshotSellThrough.textContent = bps(sellThrough.average_sell_through_ratio_bps);
+      els.snapshotNote.textContent = latestRun
+        ? `${latestRun.region || '-'} ${latestRun.locale || '-'} realm ${latestRun.connected_realm_id || '-'}`
+        : 'No snapshots yet';
+
+      const rows = overview.recent_runs || [];
+      els.snapshotRunsTable.innerHTML = rows.length ? rows.map((run) => {
+        return `<tr>
+          <td>#${run.id}</td>
+          <td><span class="pill">${run.status}</span></td>
+          <td>${shortTime(run.started_at)}</td>
+          <td>${shortTime(run.finished_at)}</td>
+          <td>${run.connected_realm_id || '-'}</td>
+          <td>${integer(run.summary_count)}</td>
+          <td>${integer(run.listing_count)}</td>
+          <td>${integer(run.total_quantity)}</td>
+          <td>${intervalLabel(run.expected_interval_seconds)}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="9" class="muted">No snapshot runs yet.</td></tr>';
     }
 
     function renderRecommendations() {
@@ -2089,6 +2328,11 @@ DASHBOARD_HTML = """<!doctype html>
       els.plRevenue.textContent = gold(summary.revenue);
       els.plCost.textContent = gold(summary.cost);
       els.plMargin.textContent = margin(summary.margin_bps);
+      const goldState = overview.player_activity?.gold || {};
+      const goldDelta = profit(goldState.delta);
+      els.goldDelta.textContent = goldDelta.text;
+      els.goldDelta.className = goldDelta.cls;
+      els.goldLatest.textContent = gold(goldState.latest?.money);
       els.plNote.textContent = `${integer(summary.sale_count)} sales, ${integer(summary.purchase_count)} purchases, ${gold(summary.unmatched_revenue)} sales missing cost basis`;
 
       const rows = profitLoss.items || [];
@@ -2131,10 +2375,12 @@ DASHBOARD_HTML = """<!doctype html>
       if (window.location.pathname === '/my-auctions') return 'player';
       if (window.location.pathname === '/profit-loss') return 'profit';
       if (window.location.pathname === '/stats') return 'stats';
+      if (window.location.pathname === '/snapshots') return 'snapshots';
       return 'market';
     }
 
     function pathForTab(tabName) {
+      if (tabName === 'snapshots') return '/snapshots';
       if (tabName === 'stats') return '/stats';
       if (tabName === 'profit') return '/profit-loss';
       return tabName === 'player' ? '/my-auctions' : '/market';

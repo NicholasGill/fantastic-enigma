@@ -1,5 +1,6 @@
 from wow_auction_tracker.features.player.addon_import import (
     AddonImportResult,
+    PlayerGoldSnapshot,
     PlayerAuctionOutcome,
     PlayerAuctionPost,
     PlayerAuctionPurchase,
@@ -10,6 +11,7 @@ from wow_auction_tracker.features.player.addon_import import (
 
 __all__ = [
     "AddonImportResult",
+    "PlayerGoldSnapshot",
     "PlayerAuctionOutcome",
     "PlayerAuctionPost",
     "PlayerAuctionPurchase",

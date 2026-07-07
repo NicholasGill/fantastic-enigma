@@ -6,6 +6,7 @@ from wow_auction_tracker.config import Market, TrackerConfig
 from wow_auction_tracker.features.crafting import CraftOpportunityObservation
 from wow_auction_tracker.features.opportunities import BuyOpportunityObservation
 from wow_auction_tracker.features.player import AddonImportResult, PlayerAuctionOutcome, PlayerAuctionPost
+from wow_auction_tracker.features.player import PlayerGoldSnapshot
 from wow_auction_tracker.features.player import PlayerAuctionPurchase
 from wow_auction_tracker.features.dashboard.server import (
     DASHBOARD_HTML,
@@ -87,6 +88,13 @@ def test_dashboard_overview_returns_latest_counts_and_items(tmp_path: Path) -> N
     assert payload["counts"]["fetch_runs"] == 3
     assert payload["counts"]["auction_listings"] == 3
     assert payload["latest_run"]["id"] == third_run_id
+    assert payload["snapshots"]["latest"]["item_count"] == 1
+    assert payload["snapshots"]["latest"]["listing_count"] == 1
+    assert payload["snapshots"]["latest"]["total_quantity"] == 5
+    assert payload["snapshots"]["latest"]["lowest_unit_price"] == 15000
+    assert payload["snapshots"]["sell_through"]["disappeared_quantity"] == 0
+    assert payload["recent_runs"][0]["summary_count"] == 1
+    assert payload["recent_runs"][0]["total_quantity"] == 5
     assert payload["items"][0]["name"] == "Bismuth"
     assert payload["items"][0]["min_unit_price"] == 15000
     assert payload["items"][0]["first_quartile_unit_price"] == 15000
@@ -198,15 +206,18 @@ def test_dashboard_flask_app_serves_html_and_json(tmp_path: Path) -> None:
     html_response = client.get("/")
     player_html_response = client.get("/my-auctions")
     profit_html_response = client.get("/profit-loss")
+    snapshots_html_response = client.get("/snapshots")
     overview_response = client.get("/api/overview")
     missing_history_response = client.get("/api/history")
 
     assert html_response.status_code == 200
     assert player_html_response.status_code == 200
     assert profit_html_response.status_code == 200
+    assert snapshots_html_response.status_code == 200
     assert b"WoW Auction Tracker" in html_response.data
     assert b"My Auctions" in player_html_response.data
     assert b"Profit / Loss" in profit_html_response.data
+    assert b"Snapshot Runs" in snapshots_html_response.data
     assert overview_response.status_code == 200
     assert overview_response.get_json()["counts"]["fetch_runs"] == 0
     assert missing_history_response.status_code == 400
@@ -400,6 +411,24 @@ def test_dashboard_overview_returns_player_activity(tmp_path: Path) -> None:
                     raw={"event_type": "commodity_purchase_succeeded"},
                 )
             ],
+            gold_snapshots=[
+                PlayerGoldSnapshot(
+                    observed_at=datetime(2026, 7, 1, 4, 50, tzinfo=UTC),
+                    reason="player_login",
+                    character="Arces",
+                    realm="Dalaran",
+                    money=100000,
+                    raw={"reason": "player_login"},
+                ),
+                PlayerGoldSnapshot(
+                    observed_at=datetime(2026, 7, 1, 5, 40, tzinfo=UTC),
+                    reason="player_money",
+                    character="Arces",
+                    realm="Dalaran",
+                    money=178000,
+                    raw={"reason": "player_money"},
+                ),
+            ],
         )
     )
 
@@ -421,6 +450,9 @@ def test_dashboard_overview_returns_player_activity(tmp_path: Path) -> None:
     assert activity["profit_loss"]["items"][0]["name"] == "Storm Dust"
     assert activity["profit_loss"]["items"][0]["net_profit"] == 78000
     assert activity["profit_loss"]["items"][0]["cost_basis_status"] == "complete"
+    assert activity["gold"]["first"]["money"] == 100000
+    assert activity["gold"]["latest"]["money"] == 178000
+    assert activity["gold"]["delta"] == 78000
     assert activity["buy_opportunities"][0]["potential_profit"] == 50000
     assert payload["craft_opportunities"][0]["recipe_id"] == "enchant-dust"
     assert payload["craft_opportunities"][0]["output_name"] == "Storm Dust"
@@ -546,6 +578,70 @@ def test_dashboard_profit_loss_does_not_count_sales_without_cost_as_profit(tmp_p
     assert activity["profit_loss"]["summary"]["margin_bps"] is None
     assert activity["profit_loss"]["items"][0]["net_profit"] is None
     assert activity["profit_loss"]["items"][0]["cost_basis_status"] == "missing_cost"
+
+
+def test_dashboard_profit_loss_matches_name_only_sales_to_duplicate_item_names(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    run_id = repository.start_fetch_run(
+        TrackerConfig.model_validate(
+            {
+                "items": [
+                    {"id": 210933, "name": "Aqirite", "market": "commodity"},
+                    {"id": 210934, "name": "Aqirite", "market": "commodity"},
+                    {"id": 210935, "name": "Aqirite", "market": "commodity"},
+                ]
+            }
+        )
+    )
+    repository.complete_fetch_run(run_id, [], [])
+    repository.import_addon_data(
+        AddonImportResult(
+            source_path=tmp_path / "WowAuctionTracker.lua",
+            addon_version=1,
+            posts=[],
+            outcomes=[
+                PlayerAuctionOutcome(
+                    observed_at=datetime(2026, 7, 1, 5, 30, tzinfo=UTC),
+                    character="Arces",
+                    realm="Dalaran",
+                    mail_index=1,
+                    item_id=None,
+                    item_name="Aqirite",
+                    item_count=100,
+                    outcome="sold",
+                    money=12000,
+                    raw={"outcome": "sold"},
+                )
+            ],
+            purchases=[
+                PlayerAuctionPurchase(
+                    observed_at=datetime(2026, 7, 1, 5, 20, tzinfo=UTC),
+                    event_type="commodity_purchase_succeeded",
+                    character="Arces",
+                    realm="Dalaran",
+                    market="commodity",
+                    auction_id=None,
+                    item_id=210934,
+                    quantity=100,
+                    unit_price=80,
+                    total_price=8000,
+                    raw={"event_type": "commodity_purchase_succeeded"},
+                )
+            ],
+        )
+    )
+
+    activity = DashboardDataStore(f"sqlite:///{db_path}").overview()["player_activity"]
+
+    assert activity["profit_loss"]["summary"]["revenue"] == 12000
+    assert activity["profit_loss"]["summary"]["cost"] == 8000
+    assert activity["profit_loss"]["summary"]["net_profit"] == 4000
+    assert activity["profit_loss"]["items"][0]["item_id"] is None
+    assert activity["profit_loss"]["items"][0]["name"] == "Aqirite"
+    assert activity["profit_loss"]["items"][0]["cost_basis_status"] == "complete"
 
 
 def test_dashboard_profit_loss_counts_open_purchases_as_negative_profit(tmp_path: Path) -> None:
@@ -832,6 +928,8 @@ def test_dashboard_table_headers_have_tooltips() -> None:
     assert 'id="profit-panel"' in DASHBOARD_HTML
     assert 'id="profit-loss-table"' in DASHBOARD_HTML
     assert "Profit / Loss" in DASHBOARD_HTML
+    assert "Wallet Change" in DASHBOARD_HTML
+    assert "Current Gold" in DASHBOARD_HTML
     assert "Known P/L" in DASHBOARD_HTML
     assert "costBasisLabel" in DASHBOARD_HTML
     assert "setActiveTab" in DASHBOARD_HTML

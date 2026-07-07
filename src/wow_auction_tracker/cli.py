@@ -368,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Imported addon data {import_id}: "
             f"{len(result.posts)} owned auction rows, {len(result.outcomes)} mail rows, "
-            f"{len(result.purchases)} purchase rows, "
+            f"{len(result.purchases)} purchase rows, {len(result.gold_snapshots or [])} gold rows, "
             f"{import_counts.get('inserted_row_count', 0)} inserted, "
             f"{import_counts.get('skipped_duplicate_count', 0)} skipped duplicates, "
             f"{import_counts.get('malformed_row_count', 0)} malformed"

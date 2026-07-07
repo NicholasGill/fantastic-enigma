@@ -28,6 +28,8 @@ character whose auctions you want to track.
   APIs fire. Commodity purchases include a best-effort price estimate from the
   visible commodity search results when WoW does not include price fields in the
   purchase success event.
+- Character gold snapshots from `GetMoney()` on login, logout, money changes,
+  auction purchase/create events, and manual `/wat gold` captures.
 
 Data is written to:
 
@@ -42,6 +44,7 @@ WoW writes SavedVariables on `/reload`, logout, or game exit.
 - `/wat status`: print current captured row counts.
 - `/wat scan`: query owned auctions and force-record the visible snapshot.
 - `/wat mail`: force-scan visible inbox rows for auction-related mail.
+- `/wat gold`: force-record the current character gold balance.
 
 ## Notes
 

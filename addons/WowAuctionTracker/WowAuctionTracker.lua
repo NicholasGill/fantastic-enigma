@@ -2,7 +2,7 @@ local ADDON_NAME = ...
 local WAT = CreateFrame("Frame")
 
 local MAX_EVENTS = 5000
-local DATA_VERSION = 4
+local DATA_VERSION = 5
 local purchaseHooksInstalled = false
 local pendingCommodityPurchase = nil
 local ownedSnapshotScheduled = false
@@ -31,6 +31,7 @@ local function EnsureDB()
   WowAuctionTrackerDB.owned_snapshots = WowAuctionTrackerDB.owned_snapshots or {}
   WowAuctionTrackerDB.mail_events = WowAuctionTrackerDB.mail_events or {}
   WowAuctionTrackerDB.purchase_events = WowAuctionTrackerDB.purchase_events or {}
+  WowAuctionTrackerDB.gold_snapshots = WowAuctionTrackerDB.gold_snapshots or {}
   WowAuctionTrackerDB.session = WowAuctionTrackerDB.session or {}
   WowAuctionTrackerDB.session.seen = WowAuctionTrackerDB.session.seen or {}
 end
@@ -95,6 +96,21 @@ local function RecordPurchaseEvent(eventType, row)
   row.character = row.character or character
   row.realm = row.realm or realm
   Append("purchase_events", row)
+end
+
+local function RecordGoldSnapshot(reason)
+  EnsureDB()
+  if GetMoney == nil then
+    return
+  end
+
+  local character, realm = PlayerName()
+  Append("gold_snapshots", {
+    reason = reason,
+    character = character,
+    realm = realm,
+    money = GetMoney(),
+  })
 end
 
 local function GetCommodityResultInfo(itemID, index)
@@ -466,11 +482,12 @@ end
 local function PrintStatus()
   EnsureDB()
   print(string.format(
-    "WoW Auction Tracker v%d: %d owned rows, %d mail rows, %d purchase rows. SavedVariables update after /reload or logout.",
+    "WoW Auction Tracker v%d: %d owned rows, %d mail rows, %d purchase rows, %d gold rows. SavedVariables update after /reload or logout.",
     WowAuctionTrackerDB.version or 0,
     #WowAuctionTrackerDB.owned_snapshots,
     #WowAuctionTrackerDB.mail_events,
-    #WowAuctionTrackerDB.purchase_events
+    #WowAuctionTrackerDB.purchase_events,
+    #WowAuctionTrackerDB.gold_snapshots
   ))
 end
 
@@ -485,6 +502,7 @@ SLASH_WOWAUCTIONTRACKER2 = "/wowauctiontracker"
 SlashCmdList.WOWAUCTIONTRACKER = function(command)
   command = string.lower(command or "")
   if command == "scan" then
+    RecordGoldSnapshot("slash_scan")
     ScheduleOwnedAuctionSnapshot("slash_scan", 1, true)
     if C_Timer ~= nil and C_Timer.After ~= nil then
       C_Timer.After(1.1, function()
@@ -494,17 +512,24 @@ SlashCmdList.WOWAUCTIONTRACKER = function(command)
       PrintStatus()
     end
   elseif command == "mail" then
+    RecordGoldSnapshot("slash_mail")
     RecordAuctionMail("slash_mail", true)
     PrintStatus()
+  elseif command == "gold" then
+    RecordGoldSnapshot("slash_gold")
+    PrintStatus()
   elseif command == "status" or command == "" then
+    RecordGoldSnapshot("slash_status")
     PrintStatus()
   else
-    print("WoW Auction Tracker commands: /wat scan, /wat mail, /wat status")
+    print("WoW Auction Tracker commands: /wat scan, /wat mail, /wat gold, /wat status")
   end
 end
 
 SafeRegisterEvent("ADDON_LOADED")
 SafeRegisterEvent("PLAYER_LOGIN")
+SafeRegisterEvent("PLAYER_LOGOUT")
+SafeRegisterEvent("PLAYER_MONEY")
 SafeRegisterEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW")
 SafeRegisterEvent("AUCTION_HOUSE_SHOW")
 SafeRegisterEvent("AUCTION_HOUSE_CLOSED")
@@ -527,6 +552,11 @@ WAT:SetScript("OnEvent", function(_, event, ...)
     WowAuctionTrackerDB.session.realm = realm
     WowAuctionTrackerDB.session.started_at = Now()
     WowAuctionTrackerDB.session.seen = {}
+    RecordGoldSnapshot("player_login")
+  elseif event == "PLAYER_LOGOUT" then
+    RecordGoldSnapshot("player_logout")
+  elseif event == "PLAYER_MONEY" then
+    RecordGoldSnapshot("player_money")
   elseif event == "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" then
     local interactionType = ...
     if Enum ~= nil and Enum.PlayerInteractionType ~= nil and interactionType ~= Enum.PlayerInteractionType.Auctioneer then
@@ -538,6 +568,7 @@ WAT:SetScript("OnEvent", function(_, event, ...)
   elseif event == "OWNED_AUCTIONS_UPDATED" then
     ScheduleOwnedAuctionSnapshot("owned_auctions_updated", 0.5, false)
   elseif event == "AUCTION_HOUSE_AUCTION_CREATED" then
+    RecordGoldSnapshot("auction_created")
     Append("events", {
       event_type = "auction_created",
     })
@@ -560,6 +591,7 @@ WAT:SetScript("OnEvent", function(_, event, ...)
         event_arg4 = SimpleValue(totalPrice),
         event_arg5 = SimpleValue(unitPrice),
       })
+      RecordGoldSnapshot("auction_purchase_completed")
     end
   elseif event == "COMMODITY_PURCHASE_SUCCEEDED" then
     local itemID, quantity, totalPrice, unitPrice = ...
@@ -587,6 +619,7 @@ WAT:SetScript("OnEvent", function(_, event, ...)
       event_arg3 = SimpleValue(totalPrice),
       event_arg4 = SimpleValue(unitPrice),
     })
+    RecordGoldSnapshot("commodity_purchase_succeeded")
     pendingCommodityPurchase = nil
   elseif event == "COMMODITY_PURCHASE_FAILED" then
     local itemID, quantity = ...

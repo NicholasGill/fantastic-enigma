@@ -200,9 +200,10 @@ copying that directory to:
 World of Warcraft/_retail_/Interface/AddOns/WowAuctionTracker
 ```
 
-In game, use `/wat scan` at the auction house and `/wat mail` at the mailbox.
-The addon records owned-auction snapshots, auction-related mailbox rows, and
-best-effort purchase events to:
+In game, use `/wat scan` at the auction house, `/wat mail` at the mailbox, and
+`/wat gold` to force-record the current wallet balance. The addon records
+owned-auction snapshots, auction-related mailbox rows, best-effort purchase
+events, and character gold snapshots to:
 
 ```text
 World of Warcraft/_retail_/WTF/Account/<ACCOUNT>/SavedVariables/WowAuctionTracker.lua
@@ -211,7 +212,8 @@ World of Warcraft/_retail_/WTF/Account/<ACCOUNT>/SavedVariables/WowAuctionTracke
 SavedVariables are written after `/reload`, logout, or game exit. Import them
 with `uv run wow-auctions import-addon --saved-variables ...` to store owned
 auction posts, mailbox sale/expiry/cancel outcomes, purchase rows, row hashes,
-dedupe counts, match confidence, and the raw addon rows in SQLite.
+gold snapshots, dedupe counts, match confidence, and the raw addon rows in
+SQLite.
 
 ## Project Layout
 

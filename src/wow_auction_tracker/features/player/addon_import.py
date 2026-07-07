@@ -57,12 +57,23 @@ class PlayerAuctionPurchase:
 
 
 @dataclass(frozen=True)
+class PlayerGoldSnapshot:
+    observed_at: datetime | None
+    reason: str | None
+    character: str | None
+    realm: str | None
+    money: int | None
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class AddonImportResult:
     source_path: Path
     addon_version: int | None
     posts: list[PlayerAuctionPost]
     outcomes: list[PlayerAuctionOutcome]
     purchases: list[PlayerAuctionPurchase]
+    gold_snapshots: list[PlayerGoldSnapshot] | None = None
     malformed_row_count: int = 0
 
 
@@ -74,6 +85,7 @@ def import_saved_variables(path: Path) -> AddonImportResult:
     owned_rows, malformed_owned = _list_of_dicts(payload.get("owned_snapshots"))
     mail_rows, malformed_mail = _list_of_dicts(payload.get("mail_events"))
     purchase_rows, malformed_purchases = _list_of_dicts(payload.get("purchase_events"))
+    gold_rows, malformed_gold = _list_of_dicts(payload.get("gold_snapshots"))
     mail_rows = _dedupe_mail_rows(mail_rows)
     purchase_rows = _dedupe_purchase_rows(
         _enrich_purchase_rows(purchase_rows)
@@ -84,7 +96,8 @@ def import_saved_variables(path: Path) -> AddonImportResult:
         posts=[_post_from_row(row) for row in owned_rows],
         outcomes=[_outcome_from_row(row) for row in mail_rows],
         purchases=[_purchase_from_row(row) for row in purchase_rows],
-        malformed_row_count=malformed_owned + malformed_mail + malformed_purchases,
+        gold_snapshots=[_gold_snapshot_from_row(row) for row in gold_rows],
+        malformed_row_count=malformed_owned + malformed_mail + malformed_purchases + malformed_gold,
     )
 
 
@@ -139,6 +152,17 @@ def _purchase_from_row(row: dict[str, Any]) -> PlayerAuctionPurchase:
         quantity=_int_or_none(row.get("quantity")),
         unit_price=_int_or_none(row.get("unit_price")),
         total_price=_int_or_none(row.get("total_price")),
+        raw=row,
+    )
+
+
+def _gold_snapshot_from_row(row: dict[str, Any]) -> PlayerGoldSnapshot:
+    return PlayerGoldSnapshot(
+        observed_at=_datetime_from_epoch(row.get("observed_at")),
+        reason=_str_or_none(row.get("reason")),
+        character=_str_or_none(row.get("character")),
+        realm=_str_or_none(row.get("realm")),
+        money=_int_or_none(row.get("money")),
         raw=row,
     )
 
