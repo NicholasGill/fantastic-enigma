@@ -193,27 +193,28 @@ from inferred or personal sale evidence.
 ## Companion Addon
 
 The `addons/WowAuctionTracker` directory contains a minimal Retail addon for
-capturing your own auction activity into WoW SavedVariables. Install it by
-copying that directory to:
+capturing mailbox auction outcomes and character gold snapshots into WoW
+SavedVariables. Install it by copying that directory to:
 
 ```text
 World of Warcraft/_retail_/Interface/AddOns/WowAuctionTracker
 ```
 
-In game, use `/wat scan` at the auction house, `/wat mail` at the mailbox, and
-`/wat gold` to force-record the current wallet balance. The addon records
-owned-auction snapshots, auction-related mailbox rows, best-effort purchase
-events, and character gold snapshots to:
+In game, use `/wat mail` at the mailbox and `/wat gold` to force-record the
+current wallet balance. Auction-house capture is disabled for now, so the addon
+does not register auction-house events, query owned auctions, or hook auction
+purchase APIs. It records auction-related mailbox rows and character gold
+snapshots to:
 
 ```text
 World of Warcraft/_retail_/WTF/Account/<ACCOUNT>/SavedVariables/WowAuctionTracker.lua
 ```
 
 SavedVariables are written after `/reload`, logout, or game exit. Import them
-with `uv run wow-auctions import-addon --saved-variables ...` to store owned
-auction posts, mailbox sale/expiry/cancel outcomes, purchase rows, row hashes,
-gold snapshots, dedupe counts, match confidence, and the raw addon rows in
-SQLite.
+with `uv run wow-auctions import-addon --saved-variables ...` to store mailbox
+sale/expiry/cancel outcomes, gold snapshots, dedupe counts, and the raw addon
+rows in SQLite. The importer remains compatible with older addon files that
+contain owned-auction or purchase rows.
 
 ## Project Layout
 

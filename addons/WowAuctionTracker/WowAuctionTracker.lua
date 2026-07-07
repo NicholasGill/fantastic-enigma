@@ -2,12 +2,7 @@ local ADDON_NAME = ...
 local WAT = CreateFrame("Frame")
 
 local MAX_EVENTS = 5000
-local DATA_VERSION = 5
-local purchaseHooksInstalled = false
-local pendingCommodityPurchase = nil
-local ownedSnapshotScheduled = false
-local pendingOwnedSnapshotReason = nil
-local pendingOwnedSnapshotForce = false
+local DATA_VERSION = 6
 local mailScanScheduled = false
 local pendingMailScanReason = nil
 local pendingMailScanForce = false
@@ -47,14 +42,6 @@ local function Append(tableName, row)
   end
 end
 
-local function SimpleValue(value)
-  local valueType = type(value)
-  if valueType == "number" or valueType == "string" or valueType == "boolean" or value == nil then
-    return value
-  end
-  return tostring(value)
-end
-
 local function KeyPart(value)
   if value == nil then
     return ""
@@ -88,16 +75,6 @@ local function AppendUnique(tableName, row, namespace, key)
   return true
 end
 
-local function RecordPurchaseEvent(eventType, row)
-  EnsureDB()
-  local character, realm = PlayerName()
-  row = row or {}
-  row.event_type = eventType
-  row.character = row.character or character
-  row.realm = row.realm or realm
-  Append("purchase_events", row)
-end
-
 local function RecordGoldSnapshot(reason)
   EnsureDB()
   if GetMoney == nil then
@@ -111,250 +88,6 @@ local function RecordGoldSnapshot(reason)
     realm = realm,
     money = GetMoney(),
   })
-end
-
-local function GetCommodityResultInfo(itemID, index)
-  if C_AuctionHouse == nil or C_AuctionHouse.GetCommoditySearchResultInfo == nil then
-    return nil
-  end
-
-  local ok, info = pcall(C_AuctionHouse.GetCommoditySearchResultInfo, itemID, index)
-  if ok and info ~= nil then
-    return info
-  end
-
-  ok, info = pcall(C_AuctionHouse.GetCommoditySearchResultInfo, index)
-  if ok and info ~= nil then
-    return info
-  end
-
-  return nil
-end
-
-local function EstimateCommodityPurchasePrice(itemID, quantity)
-  if C_AuctionHouse == nil or C_AuctionHouse.GetNumCommoditySearchResults == nil then
-    return nil, nil, nil
-  end
-  if itemID == nil or quantity == nil or quantity <= 0 then
-    return nil, nil, nil
-  end
-
-  local ok, resultCount = pcall(C_AuctionHouse.GetNumCommoditySearchResults, itemID)
-  if not ok or resultCount == nil or resultCount <= 0 then
-    return nil, nil, nil
-  end
-
-  local remaining = quantity
-  local totalPrice = 0
-  for index = 1, resultCount do
-    local info = GetCommodityResultInfo(itemID, index)
-    if info ~= nil then
-      local available = info.quantity or 0
-      local unitPrice = info.unitPrice or info.buyoutAmount
-      if available > 0 and unitPrice ~= nil then
-        local purchased = math.min(remaining, available)
-        totalPrice = totalPrice + (purchased * unitPrice)
-        remaining = remaining - purchased
-        if remaining <= 0 then
-          return math.floor(totalPrice / quantity), totalPrice, "commodity_search_results_estimate"
-        end
-      end
-    end
-  end
-
-  return nil, nil, nil
-end
-
-local function BuildCommodityPurchaseRow(eventType, itemID, quantity)
-  local unitPrice, totalPrice, priceSource = EstimateCommodityPurchasePrice(itemID, quantity)
-  if unitPrice == nil and pendingCommodityPurchase ~= nil and pendingCommodityPurchase.item_id == itemID then
-    unitPrice = pendingCommodityPurchase.unit_price
-    totalPrice = pendingCommodityPurchase.total_price
-    priceSource = pendingCommodityPurchase.price_source
-  end
-
-  local row = {
-    market = "commodity",
-    item_id = itemID,
-    quantity = quantity,
-    unit_price = unitPrice,
-    total_price = totalPrice,
-    price_source = priceSource,
-  }
-
-  if eventType == "commodity_purchase_started" or eventType == "commodity_purchase_confirmed" then
-    pendingCommodityPurchase = {
-      item_id = itemID,
-      quantity = quantity,
-      unit_price = unitPrice,
-      total_price = totalPrice,
-      price_source = priceSource,
-    }
-  end
-
-  return row
-end
-
-local function InstallPurchaseHooks()
-  if purchaseHooksInstalled then
-    return
-  end
-  if C_AuctionHouse == nil or hooksecurefunc == nil then
-    return
-  end
-
-  if C_AuctionHouse.StartCommoditiesPurchase ~= nil then
-    hooksecurefunc(C_AuctionHouse, "StartCommoditiesPurchase", function(itemID, quantity)
-      RecordPurchaseEvent("commodity_purchase_started", BuildCommodityPurchaseRow("commodity_purchase_started", itemID, quantity))
-    end)
-  end
-
-  if C_AuctionHouse.ConfirmCommoditiesPurchase ~= nil then
-    hooksecurefunc(C_AuctionHouse, "ConfirmCommoditiesPurchase", function(itemID, quantity)
-      RecordPurchaseEvent("commodity_purchase_confirmed", BuildCommodityPurchaseRow("commodity_purchase_confirmed", itemID, quantity))
-    end)
-  end
-
-  if C_AuctionHouse.PlaceBid ~= nil then
-    hooksecurefunc(C_AuctionHouse, "PlaceBid", function(auctionID, bidAmount)
-      RecordPurchaseEvent("bid_or_buyout_placed", {
-        market = "realm",
-        auction_id = auctionID,
-        total_price = bidAmount,
-      })
-    end)
-  end
-
-  purchaseHooksInstalled = true
-end
-
-local function MoneyFromOwnedAuction(info)
-  if info == nil then
-    return nil, nil
-  end
-
-  local unitPrice = info.unitPrice
-  local buyoutAmount = info.buyoutAmount
-  if unitPrice == nil and buyoutAmount ~= nil and info.quantity ~= nil and info.quantity > 0 then
-    unitPrice = math.floor(buyoutAmount / info.quantity)
-  end
-  return unitPrice, buyoutAmount
-end
-
-local function ItemKeyToFields(itemKey)
-  if itemKey == nil then
-    return nil, nil, nil, nil
-  end
-
-  return itemKey.itemID, itemKey.itemLevel, itemKey.itemSuffix, itemKey.battlePetSpeciesID
-end
-
-local function OwnedAuctionRowKey(row)
-  return BuildKey(
-    row.character,
-    row.realm,
-    row.auction_id,
-    row.item_id,
-    row.quantity,
-    row.unit_price,
-    row.buyout,
-    row.bid_amount,
-    row.time_left_seconds,
-    row.status
-  )
-end
-
-local function RecordOwnedAuctionSnapshot(reason, force)
-  EnsureDB()
-  if C_AuctionHouse == nil or C_AuctionHouse.GetNumOwnedAuctions == nil then
-    return
-  end
-
-  local character, realm = PlayerName()
-  local snapshotId = string.format("%s-%d", character or "unknown", Now())
-  local count = C_AuctionHouse.GetNumOwnedAuctions()
-  local recordedCount = 0
-
-  for index = 1, count do
-    local info = C_AuctionHouse.GetOwnedAuctionInfo(index)
-    if info ~= nil then
-      local unitPrice, buyoutAmount = MoneyFromOwnedAuction(info)
-      local itemID, itemLevel, itemSuffix, battlePetSpeciesID = ItemKeyToFields(info.itemKey)
-      local row = {
-        snapshot_id = snapshotId,
-        reason = reason,
-        character = character,
-        realm = realm,
-        auction_id = info.auctionID,
-        item_id = itemID,
-        item_level = itemLevel,
-        item_suffix = itemSuffix,
-        battle_pet_species_id = battlePetSpeciesID,
-        quantity = info.quantity,
-        unit_price = unitPrice,
-        posted_unit_price = unitPrice,
-        buyout = buyoutAmount,
-        bid_amount = info.bidAmount,
-        bidder = info.bidder,
-        deposit_cost = info.depositCost,
-        auction_duration = info.auctionDuration,
-        duration = info.duration,
-        stack_size = info.stackSize or info.quantity,
-        time_left_seconds = info.timeLeftSeconds,
-        status = info.status,
-      }
-      if force then
-        Append("owned_snapshots", row)
-        recordedCount = recordedCount + 1
-      elseif AppendUnique("owned_snapshots", row, "owned_snapshots", OwnedAuctionRowKey(row)) then
-        recordedCount = recordedCount + 1
-      end
-    end
-  end
-
-  Append("events", {
-    event_type = "owned_snapshot",
-    reason = reason,
-    character = character,
-    realm = realm,
-    snapshot_id = snapshotId,
-    owned_auction_count = count,
-    recorded_owned_auction_count = recordedCount,
-  })
-end
-
-local function QueryOwnedAuctions()
-  if C_AuctionHouse ~= nil and C_AuctionHouse.QueryOwnedAuctions ~= nil then
-    C_AuctionHouse.QueryOwnedAuctions({{ sortOrder = 1, reverseSort = false }})
-  end
-end
-
-local function ScheduleOwnedAuctionSnapshot(reason, delaySeconds, force)
-  if reason ~= "auction_house_closed" then
-    QueryOwnedAuctions()
-  end
-  pendingOwnedSnapshotReason = reason or pendingOwnedSnapshotReason
-  pendingOwnedSnapshotForce = pendingOwnedSnapshotForce or force == true
-
-  if ownedSnapshotScheduled then
-    return
-  end
-
-  ownedSnapshotScheduled = true
-  local function capture()
-    local captureReason = pendingOwnedSnapshotReason or reason
-    local captureForce = pendingOwnedSnapshotForce
-    ownedSnapshotScheduled = false
-    pendingOwnedSnapshotReason = nil
-    pendingOwnedSnapshotForce = false
-    RecordOwnedAuctionSnapshot(captureReason, captureForce)
-  end
-
-  if C_Timer ~= nil and C_Timer.After ~= nil then
-    C_Timer.After(delaySeconds or 1, capture)
-  else
-    capture()
-  end
 end
 
 local function LooksAuctionMail(subject)
@@ -482,11 +215,9 @@ end
 local function PrintStatus()
   EnsureDB()
   print(string.format(
-    "WoW Auction Tracker v%d: %d owned rows, %d mail rows, %d purchase rows, %d gold rows. SavedVariables update after /reload or logout.",
+    "WoW Auction Tracker v%d: %d mail rows, %d gold rows. Auction-house capture is disabled. SavedVariables update after /reload or logout.",
     WowAuctionTrackerDB.version or 0,
-    #WowAuctionTrackerDB.owned_snapshots,
     #WowAuctionTrackerDB.mail_events,
-    #WowAuctionTrackerDB.purchase_events,
     #WowAuctionTrackerDB.gold_snapshots
   ))
 end
@@ -503,14 +234,8 @@ SlashCmdList.WOWAUCTIONTRACKER = function(command)
   command = string.lower(command or "")
   if command == "scan" then
     RecordGoldSnapshot("slash_scan")
-    ScheduleOwnedAuctionSnapshot("slash_scan", 1, true)
-    if C_Timer ~= nil and C_Timer.After ~= nil then
-      C_Timer.After(1.1, function()
-        PrintStatus()
-      end)
-    else
-      PrintStatus()
-    end
+    print("WoW Auction Tracker: auction-house scan is disabled; recorded gold only.")
+    PrintStatus()
   elseif command == "mail" then
     RecordGoldSnapshot("slash_mail")
     RecordAuctionMail("slash_mail", true)
@@ -522,7 +247,7 @@ SlashCmdList.WOWAUCTIONTRACKER = function(command)
     RecordGoldSnapshot("slash_status")
     PrintStatus()
   else
-    print("WoW Auction Tracker commands: /wat scan, /wat mail, /wat gold, /wat status")
+    print("WoW Auction Tracker commands: /wat mail, /wat gold, /wat status")
   end
 end
 
@@ -530,23 +255,13 @@ SafeRegisterEvent("ADDON_LOADED")
 SafeRegisterEvent("PLAYER_LOGIN")
 SafeRegisterEvent("PLAYER_LOGOUT")
 SafeRegisterEvent("PLAYER_MONEY")
-SafeRegisterEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW")
-SafeRegisterEvent("AUCTION_HOUSE_SHOW")
-SafeRegisterEvent("AUCTION_HOUSE_CLOSED")
-SafeRegisterEvent("OWNED_AUCTIONS_UPDATED")
-SafeRegisterEvent("AUCTION_HOUSE_AUCTION_CREATED")
-SafeRegisterEvent("AUCTION_HOUSE_PURCHASE_COMPLETED")
-SafeRegisterEvent("COMMODITY_PURCHASE_SUCCEEDED")
-SafeRegisterEvent("COMMODITY_PURCHASE_FAILED")
 SafeRegisterEvent("MAIL_SHOW")
 SafeRegisterEvent("MAIL_INBOX_UPDATE")
 WAT:SetScript("OnEvent", function(_, event, ...)
   if event == "ADDON_LOADED" and ... == ADDON_NAME then
     EnsureDB()
-    InstallPurchaseHooks()
   elseif event == "PLAYER_LOGIN" then
     EnsureDB()
-    InstallPurchaseHooks()
     local character, realm = PlayerName()
     WowAuctionTrackerDB.session.character = character
     WowAuctionTrackerDB.session.realm = realm
@@ -557,86 +272,6 @@ WAT:SetScript("OnEvent", function(_, event, ...)
     RecordGoldSnapshot("player_logout")
   elseif event == "PLAYER_MONEY" then
     RecordGoldSnapshot("player_money")
-  elseif event == "PLAYER_INTERACTION_MANAGER_FRAME_SHOW" then
-    local interactionType = ...
-    if Enum ~= nil and Enum.PlayerInteractionType ~= nil and interactionType ~= Enum.PlayerInteractionType.Auctioneer then
-      return
-    end
-    ScheduleOwnedAuctionSnapshot("auction_house_show", 1, false)
-  elseif event == "AUCTION_HOUSE_SHOW" then
-    ScheduleOwnedAuctionSnapshot("auction_house_show", 1, false)
-  elseif event == "OWNED_AUCTIONS_UPDATED" then
-    ScheduleOwnedAuctionSnapshot("owned_auctions_updated", 0.5, false)
-  elseif event == "AUCTION_HOUSE_AUCTION_CREATED" then
-    RecordGoldSnapshot("auction_created")
-    Append("events", {
-      event_type = "auction_created",
-    })
-    ScheduleOwnedAuctionSnapshot("auction_created", 1, false)
-  elseif event == "AUCTION_HOUSE_CLOSED" then
-    ScheduleOwnedAuctionSnapshot("auction_house_closed", 0, false)
-  elseif event == "AUCTION_HOUSE_PURCHASE_COMPLETED" then
-    local auctionID, itemID, quantity, totalPrice, unitPrice = ...
-    if auctionID ~= nil and auctionID ~= 0 or itemID ~= nil or totalPrice ~= nil or unitPrice ~= nil then
-      RecordPurchaseEvent("auction_purchase_completed", {
-        market = "realm",
-        auction_id = auctionID,
-        item_id = itemID,
-        quantity = quantity,
-        total_price = totalPrice,
-        unit_price = unitPrice,
-        event_arg1 = SimpleValue(auctionID),
-        event_arg2 = SimpleValue(itemID),
-        event_arg3 = SimpleValue(quantity),
-        event_arg4 = SimpleValue(totalPrice),
-        event_arg5 = SimpleValue(unitPrice),
-      })
-      RecordGoldSnapshot("auction_purchase_completed")
-    end
-  elseif event == "COMMODITY_PURCHASE_SUCCEEDED" then
-    local itemID, quantity, totalPrice, unitPrice = ...
-    if itemID == nil and pendingCommodityPurchase ~= nil then
-      itemID = pendingCommodityPurchase.item_id
-    end
-    if quantity == nil and pendingCommodityPurchase ~= nil then
-      quantity = pendingCommodityPurchase.quantity
-    end
-    if totalPrice == nil and pendingCommodityPurchase ~= nil then
-      totalPrice = pendingCommodityPurchase.total_price
-    end
-    if unitPrice == nil and pendingCommodityPurchase ~= nil then
-      unitPrice = pendingCommodityPurchase.unit_price
-    end
-    RecordPurchaseEvent("commodity_purchase_succeeded", {
-      market = "commodity",
-      item_id = itemID,
-      quantity = quantity,
-      total_price = totalPrice,
-      unit_price = unitPrice,
-      price_source = pendingCommodityPurchase and pendingCommodityPurchase.price_source or nil,
-      event_arg1 = SimpleValue(itemID),
-      event_arg2 = SimpleValue(quantity),
-      event_arg3 = SimpleValue(totalPrice),
-      event_arg4 = SimpleValue(unitPrice),
-    })
-    RecordGoldSnapshot("commodity_purchase_succeeded")
-    pendingCommodityPurchase = nil
-  elseif event == "COMMODITY_PURCHASE_FAILED" then
-    local itemID, quantity = ...
-    if itemID == nil and pendingCommodityPurchase ~= nil then
-      itemID = pendingCommodityPurchase.item_id
-    end
-    if quantity == nil and pendingCommodityPurchase ~= nil then
-      quantity = pendingCommodityPurchase.quantity
-    end
-    RecordPurchaseEvent("commodity_purchase_failed", {
-      market = "commodity",
-      item_id = itemID,
-      quantity = quantity,
-      event_arg1 = SimpleValue(itemID),
-      event_arg2 = SimpleValue(quantity),
-    })
-    pendingCommodityPurchase = nil
   elseif event == "MAIL_SHOW" then
     ScheduleAuctionMailScan("mail_show", 0.5, false)
   elseif event == "MAIL_INBOX_UPDATE" then
