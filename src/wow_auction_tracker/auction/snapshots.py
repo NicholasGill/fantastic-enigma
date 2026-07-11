@@ -52,6 +52,13 @@ class ItemHistoryMetric:
     third_quartile_unit_price: int | None
     weighted_average_unit_price: int | None
     lowest_price_quantity: int
+    price_change_1h_bps: int | None = None
+    price_change_24h_bps: int | None = None
+    price_change_7d_bps: int | None = None
+    historical_volatility_bps: int | None = None
+    percentile_rank_bps: int | None = None
+    market_depth_score: int | None = None
+    liquidity_score: int | None = None
 
 
 def filter_auctions(payload: dict[str, Any], item_ids: set[int], market: Market) -> list[AuctionListing]:

@@ -18,7 +18,7 @@ from wow_auction_tracker.features.recommendations import Recommendation, Recomme
 from wow_auction_tracker.features.dashboard import DashboardDataStore
 from wow_auction_tracker.features.scheduler import run_snapshot_schedule
 from wow_auction_tracker.features.sellthrough import build_sell_through_metrics
-from wow_auction_tracker.features.snapshots import FetchResult, fetch_and_store
+from wow_auction_tracker.features.snapshots import FetchResult, fetch_and_store, replay_raw_fetch_run
 from wow_auction_tracker.storage import AuctionRepository, create_db_engine, init_db
 
 
@@ -43,6 +43,19 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init-db", help="Create database tables.")
     subparsers.add_parser("recompute-inference", help="Recompute derived listing lifecycle and sell-through rows.")
+    replay_parser = subparsers.add_parser("replay-raw", help="Rebuild derived rows from preserved raw auction snapshots.")
+    replay_parser.add_argument(
+        "--from-run-id",
+        type=_positive_int,
+        required=True,
+        help="First fetch run ID to replay.",
+    )
+    replay_parser.add_argument(
+        "--to-run-id",
+        type=_positive_int,
+        required=True,
+        help="Last fetch run ID to replay.",
+    )
     db_parser = subparsers.add_parser("db", help="Inspect and maintain the local database.")
     db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
     db_subparsers.add_parser("stats", help="Show table sizes and snapshot range.")
@@ -134,6 +147,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=10,
         help="Number of anomaly rows to show. Defaults to 10.",
+    )
+    report_quality_parser = report_subparsers.add_parser("quality", help="Show recent market data quality events.")
+    report_quality_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=10,
+        help="Number of quality events to show. Defaults to 10.",
     )
     report_player_parser = report_subparsers.add_parser("player", help="Show personal auction performance.")
     report_player_parser.add_argument(
@@ -257,6 +277,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "replay-raw":
+        if args.to_run_id < args.from_run_id:
+            raise ValueError("--to-run-id must be greater than or equal to --from-run-id")
+        config = load_config(args.config)
+        repository = AuctionRepository(engine)
+        replayed_count = 0
+        listing_count = 0
+        summary_count = 0
+        for run_id in repository.successful_fetch_run_ids():
+            if args.from_run_id <= run_id <= args.to_run_id:
+                result = replay_raw_fetch_run(config, repository, run_id)
+                replayed_count += 1
+                listing_count += result.listing_count
+                summary_count += result.summary_count
+        print(
+            f"Replayed {replayed_count} raw fetch run(s): "
+            f"{listing_count} listings, {summary_count} item summaries"
+        )
+        return 0
+
     if args.command == "db":
         repository = AuctionRepository(engine)
         if args.db_command == "stats":
@@ -311,6 +351,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.report_command == "anomalies":
             _print_anomaly_report(AuctionRepository(engine).list_recent_anomalies(limit=args.limit))
+            return 0
+        if args.report_command == "quality":
+            _print_quality_report(AuctionRepository(engine).list_recent_quality_events(limit=args.limit))
             return 0
         if args.report_command == "player":
             _print_player_report(store.player_performance(window_days=args.days), args.limit)
@@ -616,6 +659,26 @@ def _print_anomaly_report(rows: list[dict[str, object]]) -> None:
             f"{str(row.get('name') or 'Unknown')[:20]:<20} "
             f"{_format_copper(_optional_export_int(row.get('observed_value'))):>8}  "
             f"{_format_copper(_optional_export_int(row.get('baseline_value'))):>8}  "
+            f"{row.get('explanation') or ''}"
+        )
+
+
+def _print_quality_report(rows: list[dict[str, object]]) -> None:
+    if not rows:
+        print("No quality events available")
+        return
+
+    print("Run ID  Detected At          Type                    Sev  Market      Item ID  Observed        Expected        Explanation")
+    for row in rows:
+        print(
+            f"{int(row.get('fetch_run_id') or 0):<6}  "
+            f"{str(row.get('detected_at') or '-')[:19]:<19} "
+            f"{str(row.get('event_type') or '-')[:23]:<23} "
+            f"{int(row.get('severity') or 0):>3}  "
+            f"{str(row.get('market') or '-')[:10]:<10} "
+            f"{str(row.get('item_id') or '-'):<7}  "
+            f"{str(row.get('observed_value') or '-')[:14]:<14}  "
+            f"{str(row.get('expected_value') or '-')[:14]:<14}  "
             f"{row.get('explanation') or ''}"
         )
 

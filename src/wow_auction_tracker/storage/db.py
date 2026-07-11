@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -28,6 +28,7 @@ from wow_auction_tracker.auction import AuctionListing, ItemHistoryMetric, ItemS
 from wow_auction_tracker.config import Market, TrackerConfig, TrackedItem
 from wow_auction_tracker.features.crafting import CraftOpportunityObservation
 from wow_auction_tracker.features.lifecycle import ListingObservation, ListingSnapshot, listing_key_from_parts
+from wow_auction_tracker.features.market_data import MarketQualityEvent, RawAuctionSnapshot
 from wow_auction_tracker.features.metadata import ItemMetadata
 from wow_auction_tracker.features.opportunities import BuyOpportunityObservation
 from wow_auction_tracker.features.player import (
@@ -169,8 +170,50 @@ class ItemHistoryMetricRecord(Base):
     third_quartile_unit_price: Mapped[int | None] = mapped_column(Integer)
     weighted_average_unit_price: Mapped[int | None] = mapped_column(Integer)
     lowest_price_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    price_change_1h_bps: Mapped[int | None] = mapped_column(Integer)
+    price_change_24h_bps: Mapped[int | None] = mapped_column(Integer)
+    price_change_7d_bps: Mapped[int | None] = mapped_column(Integer)
+    historical_volatility_bps: Mapped[int | None] = mapped_column(Integer)
+    percentile_rank_bps: Mapped[int | None] = mapped_column(Integer)
+    market_depth_score: Mapped[int | None] = mapped_column(Integer)
+    liquidity_score: Mapped[int | None] = mapped_column(Integer)
 
     fetch_run: Mapped[FetchRun] = relationship(back_populates="history_metrics")
+
+
+class RawAuctionSnapshotRecord(Base):
+    __tablename__ = "raw_auction_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fetch_run_id: Mapped[int] = mapped_column(ForeignKey("fetch_runs.id"), nullable=False, index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    region: Mapped[str] = mapped_column(String(16), nullable=False)
+    locale: Mapped[str] = mapped_column(String(16), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(32), nullable=False)
+    market: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    connected_realm_id: Mapped[int | None] = mapped_column(Integer)
+    api_path: Mapped[str] = mapped_column(Text, nullable=False)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    payload_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    compressed_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    auction_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    item_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class MarketQualityEventRecord(Base):
+    __tablename__ = "market_quality_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    fetch_run_id: Mapped[int] = mapped_column(ForeignKey("fetch_runs.id"), nullable=False, index=True)
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    severity: Mapped[int] = mapped_column(Integer, nullable=False)
+    market: Mapped[str | None] = mapped_column(String(32), index=True)
+    item_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    expected_value: Mapped[str | None] = mapped_column(Text)
+    observed_value: Mapped[str | None] = mapped_column(Text)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class ListingObservationRecord(Base):
@@ -451,12 +494,14 @@ class AuctionRepository:
         sell_through_metrics: Iterable[SellThroughMetric] = (),
         buy_opportunity_observations: Iterable[BuyOpportunityObservation] = (),
         craft_opportunity_observations: Iterable[CraftOpportunityObservation] = (),
+        market_quality_events: Iterable[MarketQualityEvent] = (),
     ) -> None:
         history_metric_list = list(history_metrics)
         with Session(self.engine) as session:
             run = session.get(FetchRun, fetch_run_id)
             if run is None:
                 raise ValueError(f"fetch run {fetch_run_id} does not exist")
+            history_metric_list = _enrich_history_metrics(session, run, history_metric_list)
 
             for listing in listings:
                 session.add(
@@ -503,6 +548,13 @@ class AuctionRepository:
                         third_quartile_unit_price=metric.third_quartile_unit_price,
                         weighted_average_unit_price=metric.weighted_average_unit_price,
                         lowest_price_quantity=metric.lowest_price_quantity,
+                        price_change_1h_bps=metric.price_change_1h_bps,
+                        price_change_24h_bps=metric.price_change_24h_bps,
+                        price_change_7d_bps=metric.price_change_7d_bps,
+                        historical_volatility_bps=metric.historical_volatility_bps,
+                        percentile_rank_bps=metric.percentile_rank_bps,
+                        market_depth_score=metric.market_depth_score,
+                        liquidity_score=metric.liquidity_score,
                     )
                 )
 
@@ -597,6 +649,22 @@ class AuctionRepository:
                     )
                 )
 
+            session.execute(delete(MarketQualityEventRecord).where(MarketQualityEventRecord.fetch_run_id == fetch_run_id))
+            for event in market_quality_events:
+                session.add(
+                    MarketQualityEventRecord(
+                        fetch_run_id=event.fetch_run_id,
+                        detected_at=event.detected_at,
+                        event_type=event.event_type,
+                        severity=event.severity,
+                        market=event.market,
+                        item_id=event.item_id,
+                        expected_value=event.expected_value,
+                        observed_value=event.observed_value,
+                        explanation=event.explanation,
+                    )
+                )
+
             run.finished_at = datetime.now(UTC)
             run.status = "success"
             _rebuild_daily_metrics_for_date(session, run.started_at.date())
@@ -612,7 +680,79 @@ class AuctionRepository:
             run.finished_at = datetime.now(UTC)
             run.status = "failed"
             run.error = error
+            session.add(
+                MarketQualityEventRecord(
+                    fetch_run_id=fetch_run_id,
+                    detected_at=run.finished_at,
+                    event_type="api_failure",
+                    severity=100,
+                    market=None,
+                    item_id=None,
+                    expected_value="successful fetch",
+                    observed_value="failed fetch",
+                    explanation=error,
+                )
+            )
             session.commit()
+
+    def store_raw_auction_snapshot(self, snapshot: RawAuctionSnapshot) -> int:
+        with Session(self.engine) as session:
+            record = RawAuctionSnapshotRecord(
+                fetch_run_id=snapshot.fetch_run_id,
+                fetched_at=snapshot.fetched_at,
+                region=snapshot.region,
+                locale=snapshot.locale,
+                namespace=snapshot.namespace,
+                market=snapshot.market,
+                connected_realm_id=snapshot.connected_realm_id,
+                api_path=snapshot.api_path,
+                storage_path=snapshot.storage_path,
+                payload_sha256=snapshot.payload_sha256,
+                payload_size_bytes=snapshot.payload_size_bytes,
+                compressed_size_bytes=snapshot.compressed_size_bytes,
+                auction_count=snapshot.auction_count,
+                item_count=snapshot.item_count,
+            )
+            session.add(record)
+            session.commit()
+            return record.id
+
+    def list_raw_auction_snapshots(self, fetch_run_id: int) -> list[RawAuctionSnapshot]:
+        with Session(self.engine) as session:
+            rows = session.scalars(
+                select(RawAuctionSnapshotRecord)
+                .where(RawAuctionSnapshotRecord.fetch_run_id == fetch_run_id)
+                .order_by(RawAuctionSnapshotRecord.market, RawAuctionSnapshotRecord.id)
+            ).all()
+            return [_raw_snapshot_from_record(row) for row in rows]
+
+    def previous_raw_auction_snapshots(self, fetch_run_id: int) -> list[RawAuctionSnapshot]:
+        previous_run_id = self.previous_successful_fetch_run_id(fetch_run_id)
+        if previous_run_id is None:
+            return []
+        return self.list_raw_auction_snapshots(previous_run_id)
+
+    def list_recent_quality_events(self, *, limit: int = 10) -> list[dict[str, object]]:
+        with Session(self.engine) as session:
+            rows = session.scalars(
+                select(MarketQualityEventRecord)
+                .order_by(MarketQualityEventRecord.detected_at.desc(), MarketQualityEventRecord.severity.desc())
+                .limit(limit)
+            ).all()
+            return [
+                {
+                    "fetch_run_id": row.fetch_run_id,
+                    "detected_at": row.detected_at,
+                    "event_type": row.event_type,
+                    "severity": row.severity,
+                    "market": row.market,
+                    "item_id": row.item_id,
+                    "expected_value": row.expected_value,
+                    "observed_value": row.observed_value,
+                    "explanation": row.explanation,
+                }
+                for row in rows
+            ]
 
     def list_summaries(self, fetch_run_id: int) -> list[ItemSummary]:
         with Session(self.engine) as session:
@@ -752,6 +892,48 @@ class AuctionRepository:
                 run = session.get(FetchRun, fetch_run_id)
                 if run is not None:
                     _rebuild_daily_metrics_for_date(session, run.started_at.date())
+
+    def replace_snapshot_derivatives(
+        self,
+        fetch_run_id: int,
+        listings: Iterable[AuctionListing],
+        summaries: Iterable[ItemSummary],
+        history_metrics: Iterable[ItemHistoryMetric],
+        listing_observations: Iterable[ListingObservation],
+        sell_through_metrics: Iterable[SellThroughMetric],
+        buy_opportunity_observations: Iterable[BuyOpportunityObservation],
+        craft_opportunity_observations: Iterable[CraftOpportunityObservation],
+        market_quality_events: Iterable[MarketQualityEvent],
+    ) -> None:
+        with self.engine.begin() as connection:
+            run_exists = connection.scalar(select(FetchRun.id).where(FetchRun.id == fetch_run_id))
+            if run_exists is None:
+                raise ValueError(f"fetch run {fetch_run_id} does not exist")
+
+            for table in (
+                AuctionListingRecord,
+                ItemSummaryRecord,
+                ItemHistoryMetricRecord,
+                ListingObservationRecord,
+                SellThroughMetricRecord,
+                BuyOpportunityObservationRecord,
+                CraftOpportunityObservationRecord,
+                ItemAnomalyRecord,
+                MarketQualityEventRecord,
+            ):
+                connection.execute(delete(table).where(table.fetch_run_id == fetch_run_id))
+
+        self.complete_fetch_run(
+            fetch_run_id,
+            listings,
+            summaries,
+            history_metrics,
+            listing_observations,
+            sell_through_metrics,
+            buy_opportunity_observations,
+            craft_opportunity_observations,
+            market_quality_events,
+        )
 
     def list_listing_snapshots(self, fetch_run_id: int) -> list[ListingSnapshot]:
         with Session(self.engine) as session:
@@ -1027,6 +1209,7 @@ class AuctionRepository:
     def database_stats(self) -> dict[str, object]:
         tables = [
             FetchRun,
+            RawAuctionSnapshotRecord,
             AuctionListingRecord,
             ItemSummaryRecord,
             ItemHistoryMetricRecord,
@@ -1034,6 +1217,7 @@ class AuctionRepository:
             SellThroughMetricRecord,
             ItemDailyMetricRecord,
             ItemAnomalyRecord,
+            MarketQualityEventRecord,
             BuyOpportunityObservationRecord,
             CraftOpportunityObservationRecord,
             AddonImportRecord,
@@ -1176,6 +1360,175 @@ def _rebuild_daily_metrics_for_date(session: Session, metric_date: date) -> None
                 updated_at=now,
             )
         )
+
+
+def _raw_snapshot_from_record(row: RawAuctionSnapshotRecord) -> RawAuctionSnapshot:
+    return RawAuctionSnapshot(
+        fetch_run_id=row.fetch_run_id,
+        fetched_at=row.fetched_at,
+        region=row.region,
+        locale=row.locale,
+        namespace=row.namespace,
+        market=row.market,
+        connected_realm_id=row.connected_realm_id,
+        api_path=row.api_path,
+        storage_path=row.storage_path,
+        payload_sha256=row.payload_sha256,
+        payload_size_bytes=row.payload_size_bytes,
+        compressed_size_bytes=row.compressed_size_bytes,
+        auction_count=row.auction_count,
+        item_count=row.item_count,
+    )
+
+
+def _enrich_history_metrics(
+    session: Session,
+    run: FetchRun,
+    current_metrics: list[ItemHistoryMetric],
+) -> list[ItemHistoryMetric]:
+    enriched: list[ItemHistoryMetric] = []
+    for metric in current_metrics:
+        prior_rows = session.scalars(
+            select(ItemHistoryMetricRecord)
+            .join(FetchRun, FetchRun.id == ItemHistoryMetricRecord.fetch_run_id)
+            .where(
+                FetchRun.started_at < run.started_at,
+                FetchRun.status == "success",
+                ItemHistoryMetricRecord.item_id == metric.item_id,
+                ItemHistoryMetricRecord.market == metric.market.value,
+            )
+            .order_by(FetchRun.started_at)
+        ).all()
+        current_price = _metric_signal_price(metric)
+        prior_prices = [_metric_record_signal_price(row) for row in prior_rows]
+        prior_prices = [price for price in prior_prices if price is not None and price > 0]
+        avg_quantity = _average_optional(row.total_quantity for row in prior_rows)
+        avg_listing_count = _average_optional(row.listing_count for row in prior_rows)
+        sell_through_confidence = _latest_sell_through_confidence(session, run.id, metric.item_id, metric.market.value)
+
+        enriched.append(
+            ItemHistoryMetric(
+                item_id=metric.item_id,
+                market=metric.market,
+                listing_count=metric.listing_count,
+                total_quantity=metric.total_quantity,
+                min_unit_price=metric.min_unit_price,
+                median_unit_price=metric.median_unit_price,
+                first_quartile_unit_price=metric.first_quartile_unit_price,
+                third_quartile_unit_price=metric.third_quartile_unit_price,
+                weighted_average_unit_price=metric.weighted_average_unit_price,
+                lowest_price_quantity=metric.lowest_price_quantity,
+                price_change_1h_bps=_price_change_for_window(prior_rows, current_price, run.started_at, timedelta(hours=1)),
+                price_change_24h_bps=_price_change_for_window(prior_rows, current_price, run.started_at, timedelta(hours=24)),
+                price_change_7d_bps=_price_change_for_window(prior_rows, current_price, run.started_at, timedelta(days=7)),
+                historical_volatility_bps=_historical_volatility_bps([*prior_prices, current_price] if current_price else prior_prices),
+                percentile_rank_bps=_percentile_rank_bps(prior_prices, current_price),
+                market_depth_score=_market_depth_score(metric.total_quantity, avg_quantity),
+                liquidity_score=_liquidity_score(
+                    listing_count=metric.listing_count,
+                    total_quantity=metric.total_quantity,
+                    average_listing_count=avg_listing_count,
+                    average_quantity=avg_quantity,
+                    sell_through_confidence=sell_through_confidence,
+                ),
+            )
+        )
+    return enriched
+
+
+def _metric_signal_price(metric: ItemHistoryMetric) -> int | None:
+    return (
+        metric.median_unit_price
+        or metric.first_quartile_unit_price
+        or metric.weighted_average_unit_price
+        or metric.min_unit_price
+    )
+
+
+def _metric_record_signal_price(row: ItemHistoryMetricRecord) -> int | None:
+    return row.median_unit_price or row.first_quartile_unit_price or row.weighted_average_unit_price or row.min_unit_price
+
+
+def _price_change_for_window(
+    prior_rows: list[ItemHistoryMetricRecord],
+    current_price: int | None,
+    current_started_at: datetime,
+    window: timedelta,
+) -> int | None:
+    if current_price is None or current_price <= 0 or not prior_rows:
+        return None
+    target = current_started_at - window
+    selected: ItemHistoryMetricRecord | None = None
+    for row in prior_rows:
+        run = row.fetch_run
+        if run is not None and run.started_at <= target:
+            selected = row
+    if selected is None:
+        selected = prior_rows[0]
+    baseline = _metric_record_signal_price(selected)
+    if baseline is None or baseline <= 0:
+        return None
+    return round(((current_price - baseline) / baseline) * 10000)
+
+
+def _historical_volatility_bps(prices: list[int | None]) -> int | None:
+    clean_prices = [price for price in prices if price is not None and price > 0]
+    if len(clean_prices) < 3:
+        return None
+    returns = [
+        (clean_prices[index] - clean_prices[index - 1]) / clean_prices[index - 1]
+        for index in range(1, len(clean_prices))
+        if clean_prices[index - 1] > 0
+    ]
+    if len(returns) < 2:
+        return None
+    average_return = sum(returns) / len(returns)
+    variance = sum((value - average_return) ** 2 for value in returns) / (len(returns) - 1)
+    return round((variance ** 0.5) * 10000)
+
+
+def _percentile_rank_bps(prior_prices: list[int], current_price: int | None) -> int | None:
+    if current_price is None or not prior_prices:
+        return None
+    below_or_equal = sum(1 for price in prior_prices if price <= current_price)
+    return round((below_or_equal / len(prior_prices)) * 10000)
+
+
+def _market_depth_score(total_quantity: int, average_quantity: int | None) -> int:
+    if average_quantity is None or average_quantity <= 0:
+        return min(100, total_quantity)
+    return round(max(0.0, min((total_quantity / average_quantity) * 50, 100.0)))
+
+
+def _liquidity_score(
+    *,
+    listing_count: int,
+    total_quantity: int,
+    average_listing_count: int | None,
+    average_quantity: int | None,
+    sell_through_confidence: int | None,
+) -> int:
+    listing_component = _market_depth_score(listing_count, average_listing_count)
+    quantity_component = _market_depth_score(total_quantity, average_quantity)
+    confidence_component = sell_through_confidence if sell_through_confidence is not None else 0
+    return round((listing_component * 0.35) + (quantity_component * 0.35) + (confidence_component * 0.30))
+
+
+def _latest_sell_through_confidence(
+    session: Session,
+    fetch_run_id: int,
+    item_id: int,
+    market: str,
+) -> int | None:
+    return session.scalar(
+        select(SellThroughMetricRecord.confidence)
+        .where(
+            SellThroughMetricRecord.fetch_run_id == fetch_run_id,
+            SellThroughMetricRecord.item_id == item_id,
+            SellThroughMetricRecord.market == market,
+        )
+        .limit(1)
+    )
 
 
 def _record_item_anomalies(
@@ -1443,8 +1796,64 @@ def _ensure_sqlite_compatible_schema(engine: Engine) -> None:
             {
                 "first_quartile_unit_price": "integer",
                 "third_quartile_unit_price": "integer",
+                "price_change_1h_bps": "integer",
+                "price_change_24h_bps": "integer",
+                "price_change_7d_bps": "integer",
+                "historical_volatility_bps": "integer",
+                "percentile_rank_bps": "integer",
+                "market_depth_score": "integer",
+                "liquidity_score": "integer",
             },
         )
+        connection.exec_driver_sql(
+            """
+            create table if not exists raw_auction_snapshots (
+                id integer primary key,
+                fetch_run_id integer not null,
+                fetched_at datetime not null,
+                region varchar(16) not null,
+                locale varchar(16) not null,
+                namespace varchar(32) not null,
+                market varchar(32) not null,
+                connected_realm_id integer,
+                api_path text not null,
+                storage_path text not null,
+                payload_sha256 varchar(64) not null,
+                payload_size_bytes integer not null,
+                compressed_size_bytes integer not null,
+                auction_count integer not null,
+                item_count integer not null,
+                foreign key(fetch_run_id) references fetch_runs (id)
+            )
+            """
+        )
+        for column in ("fetch_run_id", "fetched_at", "market", "payload_sha256"):
+            connection.exec_driver_sql(
+                f"create index if not exists ix_raw_auction_snapshots_{column} "
+                f"on raw_auction_snapshots ({column})"
+            )
+        connection.exec_driver_sql(
+            """
+            create table if not exists market_quality_events (
+                id integer primary key,
+                fetch_run_id integer not null,
+                detected_at datetime not null,
+                event_type varchar(64) not null,
+                severity integer not null,
+                market varchar(32),
+                item_id integer,
+                expected_value text,
+                observed_value text,
+                explanation text not null,
+                foreign key(fetch_run_id) references fetch_runs (id)
+            )
+            """
+        )
+        for column in ("fetch_run_id", "detected_at", "event_type", "market", "item_id"):
+            connection.exec_driver_sql(
+                f"create index if not exists ix_market_quality_events_{column} "
+                f"on market_quality_events ({column})"
+            )
         _ensure_sqlite_columns(
             connection,
             "listing_observations",

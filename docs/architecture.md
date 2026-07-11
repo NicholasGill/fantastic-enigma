@@ -49,7 +49,9 @@ flowchart TB
 
   subgraph Pipeline["Snapshot Pipeline"]
     FetchStore["fetch_and_store\nfeatures/snapshots.py"]
+    RawSnapshots["raw payload preservation\nfeatures/market_data.py"]
     AuctionParsing["auction parsing and summaries\nauction/snapshots.py"]
+    Quality["market data quality events\nfeatures/market_data.py"]
     Metadata["item metadata\nfeatures/metadata/items.py"]
     Lifecycle["listing lifecycle\nfeatures/lifecycle/observations.py"]
     SellThrough["sell-through inference\nfeatures/sellthrough/inference.py"]
@@ -82,15 +84,19 @@ flowchart TB
 
   FetchStore --> AuctionParsing
   FetchStore --> Metadata
+  FetchStore --> RawSnapshots
   FetchStore --> Lifecycle
+  FetchStore --> Quality
   FetchStore --> SellThrough
   FetchStore --> BuySignals
   FetchStore --> CraftSignals
 
   AuctionParsing --> Repository
   Metadata --> Repository
+  RawSnapshots --> Repository
   Lifecycle --> Repository
   SellThrough --> Repository
+  Quality --> Repository
   BuySignals --> Repository
   CraftSignals --> Repository
   AddonImporter --> Repository
@@ -125,10 +131,11 @@ sequenceDiagram
   Pipeline->>Blizzard: fetch item metadata/media
   Pipeline->>Repo: upsert_item_metadata()
   Pipeline->>Blizzard: fetch realm and commodity auctions
+  Pipeline->>Repo: store raw payload metadata and gzipped JSON paths
   Pipeline->>Pipeline: filter tracked items and summarize prices
-  Pipeline->>Pipeline: derive lifecycle, sell-through, buy, and craft signals
+  Pipeline->>Pipeline: derive lifecycle, sell-through, quality, buy, and craft signals
   Pipeline->>Repo: complete_fetch_run(...)
-  Repo->>DB: write listings, summaries, metrics, opportunities
+  Repo->>DB: write listings, summaries, metrics, quality events, opportunities
   Repo->>DB: rebuild daily metrics and record anomalies
   Pipeline-->>CLI: FetchResult
 ```
@@ -162,6 +169,7 @@ sequenceDiagram
 ```mermaid
 erDiagram
   FETCH_RUNS ||--o{ AUCTION_LISTINGS : contains
+  FETCH_RUNS ||--o{ RAW_AUCTION_SNAPSHOTS : preserves
   FETCH_RUNS ||--o{ ITEM_SUMMARIES : summarizes
   FETCH_RUNS ||--o{ ITEM_HISTORY_METRICS : records
   FETCH_RUNS ||--o{ LISTING_OBSERVATIONS : derives
@@ -169,6 +177,7 @@ erDiagram
   FETCH_RUNS ||--o{ BUY_OPPORTUNITY_OBSERVATIONS : derives
   FETCH_RUNS ||--o{ CRAFT_OPPORTUNITY_OBSERVATIONS : derives
   FETCH_RUNS ||--o{ ITEM_ANOMALIES : detects
+  FETCH_RUNS ||--o{ MARKET_QUALITY_EVENTS : monitors
 
   ADDON_IMPORTS ||--o{ PLAYER_AUCTION_POSTS : imports
   ADDON_IMPORTS ||--o{ PLAYER_AUCTION_OUTCOMES : imports
@@ -187,6 +196,14 @@ erDiagram
 - `AuctionRepository` is the write-side persistence boundary for snapshot and
   addon import data. The dashboard uses direct SQLite reads through
   `DashboardDataStore` for read-optimized overview payloads.
+- Full Blizzard auction payloads are preserved before filtering tracked items.
+  The raw payload body is stored as gzipped JSON under ignored `data/raw_snapshots/`;
+  SQLite stores searchable metadata such as market, API path, payload hash,
+  storage path, auction count, and payload sizes.
+- Raw replay rebuilds derived snapshot rows from preserved payloads without
+  changing fetch run identity or addon/player import data.
+- Market quality events track stale cadence, missing configured items, repeated
+  payloads, empty payloads, large record-count changes, and API failures.
 - Snapshot-derived demand is inferred from listing disappearance between fetch
   runs, so sell-through metrics are estimates rather than confirmed sales.
 - The addon remains a minimal SavedVariables recorder. It captures player-owned

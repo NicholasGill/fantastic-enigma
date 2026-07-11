@@ -1,4 +1,5 @@
 from typing import Any
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -11,6 +12,9 @@ from wow_auction_tracker.storage import (
     BuyOpportunityObservationRecord,
     CraftOpportunityObservationRecord,
     FetchRun,
+    ItemHistoryMetricRecord,
+    MarketQualityEventRecord,
+    RawAuctionSnapshotRecord,
     create_db_engine,
     init_db,
 )
@@ -69,6 +73,84 @@ def test_fetch_and_store_combines_realm_and_commodity_sources() -> None:
     assert result.listing_count == 2
     assert result.summary_count == 2
     assert client.fetched_item_ids == [19019, 124105]
+
+
+def test_fetch_and_store_preserves_raw_payload_metadata(tmp_path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    raw_dir = tmp_path / "raw"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate({"items": [{"id": 124105, "market": "commodity"}]})
+
+    result = fetch_and_store(
+        config,
+        FakeClient(commodity_payload={"auctions": [{"id": 2, "item": {"id": 124105}, "quantity": 4, "unit_price": 200}]}),
+        repository,
+        raw_snapshot_dir=raw_dir,
+    )  # type: ignore[arg-type]
+
+    with Session(engine) as session:
+        snapshot = session.scalars(select(RawAuctionSnapshotRecord)).one()
+
+    assert snapshot.fetch_run_id == result.fetch_run_id
+    assert snapshot.market == "commodity"
+    assert snapshot.auction_count == 1
+    assert snapshot.item_count == 1
+    assert snapshot.payload_sha256
+    assert Path(snapshot.storage_path).exists()
+    assert Path(snapshot.storage_path).is_relative_to(raw_dir)
+
+
+def test_fetch_and_store_records_quality_events_for_missing_items(tmp_path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate({"items": [{"id": 124105, "market": "commodity"}]})
+
+    fetch_and_store(
+        config,
+        FakeClient(commodity_payload={"auctions": [{"id": 2, "item": {"id": 999999}, "quantity": 4, "unit_price": 200}]}),
+        repository,
+        raw_snapshot_dir=tmp_path / "raw",
+    )  # type: ignore[arg-type]
+
+    with Session(engine) as session:
+        events = session.scalars(select(MarketQualityEventRecord)).all()
+
+    assert {event.event_type for event in events} == {"missing_configured_item"}
+    assert events[0].item_id == 124105
+
+
+def test_fetch_and_store_enriches_history_metrics_with_risk_fields(tmp_path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate({"items": [{"id": 124105, "market": "commodity"}]})
+
+    for price in (100, 120, 90, 150):
+        fetch_and_store(
+            config,
+            FakeClient(
+                commodity_payload={
+                    "auctions": [{"id": price, "item": {"id": 124105}, "quantity": 10, "unit_price": price}]
+                }
+            ),
+            repository,
+            raw_snapshot_dir=tmp_path / "raw",
+        )  # type: ignore[arg-type]
+
+    with Session(engine) as session:
+        latest = session.scalars(select(ItemHistoryMetricRecord).order_by(ItemHistoryMetricRecord.fetch_run_id.desc())).first()
+
+    assert latest is not None
+    assert latest.price_change_1h_bps == 5000
+    assert latest.percentile_rank_bps == 10000
+    assert latest.historical_volatility_bps is not None
+    assert latest.market_depth_score is not None
+    assert latest.liquidity_score is not None
 
 
 def test_fetch_and_store_marks_failed_runs() -> None:

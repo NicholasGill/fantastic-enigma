@@ -11,6 +11,7 @@ from wow_auction_tracker.cli import _format_file_size
 from wow_auction_tracker.cli import main
 from wow_auction_tracker.features.crafting import CraftOpportunityObservation
 from wow_auction_tracker.features.lifecycle import build_listing_observations
+from wow_auction_tracker.features.market_data import api_path_for_market, write_raw_auction_snapshot
 from wow_auction_tracker.features.metadata import ItemMetadata
 from wow_auction_tracker.storage import AuctionRepository, create_db_engine, init_db
 
@@ -204,6 +205,75 @@ def test_report_anomalies_command_prints_recent_anomalies(capsys: pytest.Capture
     assert exit_code == 0
     assert "price_spike" in captured
     assert "210930" in captured
+
+
+def test_report_quality_command_prints_recent_quality_events(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate({"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]})
+    run_id = repository.start_fetch_run(config)
+    repository.fail_fetch_run(run_id, "api unavailable")
+
+    exit_code = main(["--database-url", f"sqlite:///{db_path}", "report", "quality", "--limit", "1"])
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "api_failure" in captured
+    assert "api unavailable" in captured
+
+
+def test_replay_raw_command_rebuilds_derived_rows(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    config_path = tmp_path / "items.yaml"
+    config_path.write_text(
+        """
+items:
+  - id: 210930
+    name: Bismuth
+    market: commodity
+""",
+        encoding="utf-8",
+    )
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate({"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]})
+    run_id = repository.start_fetch_run(config)
+    raw_snapshot, _payload = write_raw_auction_snapshot(
+        {"auctions": [{"id": 99, "item": {"id": 210930}, "quantity": 5, "unit_price": 250}]},
+        root_dir=tmp_path / "raw",
+        fetch_run_id=run_id,
+        region="us",
+        locale="en_US",
+        namespace="dynamic-us",
+        market=Market.COMMODITY,
+        connected_realm_id=None,
+        api_path=api_path_for_market(Market.COMMODITY, None),
+    )
+    repository.store_raw_auction_snapshot(raw_snapshot)
+    stale_listing = [
+        AuctionListing(1, 210930, Market.COMMODITY, 1, 100, None, None, "LONG", {"id": 1, "item": {"id": 210930}})
+    ]
+    repository.complete_fetch_run(run_id, stale_listing, summarize_listings(stale_listing))
+
+    exit_code = main([
+        "--config",
+        str(config_path),
+        "--database-url",
+        f"sqlite:///{db_path}",
+        "replay-raw",
+        "--from-run-id",
+        str(run_id),
+        "--to-run-id",
+        str(run_id),
+    ])
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Replayed 1 raw fetch run" in captured
+    assert repository.list_auction_listings(run_id)[0].auction_id == 99
 
 
 def test_export_latest_command_writes_csv(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:

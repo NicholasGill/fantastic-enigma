@@ -78,37 +78,6 @@ missing scope from a full auction-house quantitative trading system.
 
 ### Market Data Platform
 
-- [ ] Preserve full raw Blizzard API responses before filtering tracked items.
-  - Store raw payload metadata, retrieval timestamp, region, namespace,
-    connected realm, market type, API URL, and response checksum.
-  - Keep filtered local tables for day-to-day use, but make raw snapshots
-    replayable for future parsers and backfills.
-
-- [ ] Split realm auctions and regional commodities into explicit market
-  pipelines.
-  - Model commodities as region-wide markets and realm items as connected-realm
-    markets.
-  - Keep independent freshness checks, snapshot counts, and derived metrics for
-    each market type.
-
-- [ ] Add historical price-change and risk metrics.
-  - Calculate 1-hour, 24-hour, and 7-day price changes.
-  - Calculate historical volatility, moving averages, percentile rank, market
-    depth, and liquidity score.
-  - Use first quartile, median, and percentile fields as primary price signals.
-
-- [ ] Add data-quality monitoring.
-  - Detect stale snapshots, missing configured items or realms, API failures,
-    repeated identical snapshots, and sudden record-count changes.
-  - Store quality events and expose them in CLI reports and the dashboard health
-    panel.
-
-- [ ] Add replay support for derived processing.
-  - Rebuild lifecycle observations, sell-through metrics, recommendations,
-    opportunities, anomalies, and rollups from historical raw snapshots.
-  - Make replay idempotent so processing can be rerun safely after scoring
-    changes.
-
 - [ ] Add optional production data stores.
   - Keep SQLite as the local default.
   - Add PostgreSQL support for users, positions, watchlists, transactions, and

@@ -48,6 +48,12 @@ Fetch one configured auction snapshot:
 uv run wow-auctions fetch
 ```
 
+Fetches preserve full Blizzard auction payloads as gzipped JSON under
+`data/raw_snapshots/` before filtering tracked items. The database stores raw
+snapshot metadata, including market type, API path, payload hash, payload size,
+auction count, and item count. Override the raw snapshot directory with
+`WAT_RAW_SNAPSHOT_DIR`.
+
 Run snapshots repeatedly at a fixed interval:
 
 ```bash
@@ -114,6 +120,16 @@ Show recent price and inventory anomalies:
 uv run wow-auctions report anomalies --limit 10
 ```
 
+Show recent market data quality events:
+
+```bash
+uv run wow-auctions report quality --limit 10
+```
+
+Quality events flag empty payloads, repeated raw payload hashes, missing
+configured items, stale snapshot cadence, large record-count changes, and fetch
+failures.
+
 Import companion addon SavedVariables after copying or pointing at the game
 file:
 
@@ -165,6 +181,17 @@ Raw listing pruning deletes old `auction_listings` rows only. Summaries,
 history metrics, sell-through metrics, daily rollups, opportunities, and player
 data are preserved.
 
+Rebuild derived rows from preserved raw Blizzard payloads:
+
+```bash
+uv run wow-auctions replay-raw --from-run-id 100 --to-run-id 120
+```
+
+Replay refilters raw snapshots with the current config and rebuilds listings,
+summaries, history metrics, lifecycle observations, sell-through metrics,
+opportunities, anomalies, daily rollups, and quality events for successful fetch
+runs in the selected range.
+
 Recommendations are conservative estimates based on current price versus recent
 median price, inferred sell-through, recent quantity drops, listing scarcity,
 recent price trend, snapshot count, and imported player auction outcomes when
@@ -173,6 +200,11 @@ purchases, so imported personal sale and expiry signals are preferred over
 inferred market sell-through once enough personal history exists. Trend score is
 shown as a 0-100 market-risk signal: 50 is flat, higher is rising, and lower is
 falling.
+
+History metrics also include data-engineering risk fields for price change over
+recent windows, historical volatility, percentile rank, market depth, and
+liquidity. These fields are derived from stored snapshot history and rebuilt
+during raw replay.
 
 Recommendation output includes a recommended per-unit sell price when there is
 inferred sale evidence. It uses the average unit price of disappeared listings
