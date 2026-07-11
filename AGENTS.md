@@ -60,6 +60,10 @@ Use lowercase, hyphenated documentation names, for example `docs/api-notes.md`.
 Use `PascalCase` for classes and `snake_case` for Python variables, functions,
 and modules.
 
+Keep `PLAN.md` focused on future work. When a planned feature is completed,
+move its completed checklist entry and relevant notes from `PLAN.md` to
+`completed.md` instead of leaving checked-off work in the active plan.
+
 Keep feature-specific code grouped under `src/wow_auction_tracker/features/`.
 Use `auction/` for auction parsing and summary models, `clients/` for external
 API clients, and `storage/` for database models/repositories.
