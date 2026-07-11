@@ -73,7 +73,33 @@ class DashboardDataStore:
                     display_timezone=display_timezone,
                 ).recommend()
             ]
-            recommendations = all_recommendations[:8]
+            buy_recommendations = sorted(
+                [
+                    item for item in all_recommendations
+                    if int(item.get("buy_score") or 0) >= int(item.get("sell_score") or 0)
+                    and int(item.get("buy_score") or 0) > 0
+                ],
+                key=lambda item: (
+                    int(item.get("buy_score") or 0),
+                    int(item.get("confidence") or 0),
+                    int(item.get("estimated_demand_score") or 0),
+                ),
+                reverse=True,
+            )[:12]
+            sell_recommendations = sorted(
+                [
+                    item for item in all_recommendations
+                    if int(item.get("sell_score") or 0) > int(item.get("buy_score") or 0)
+                    and int(item.get("sell_score") or 0) > 0
+                ],
+                key=lambda item: (
+                    int(item.get("sell_score") or 0),
+                    int(item.get("confidence") or 0),
+                    int(item.get("estimated_demand_score") or 0),
+                ),
+                reverse=True,
+            )[:12]
+            recommendations = buy_recommendations[:8]
             recommendation_by_item_id = {
                 int(item["item_id"]): item
                 for item in all_recommendations
@@ -89,6 +115,8 @@ class DashboardDataStore:
                 item["latest_shifted_unit_price"] = recommendation.get("latest_shifted_unit_price")
                 item["recommendation_action"] = recommendation.get("action")
                 item["recommendation_score"] = recommendation.get("score")
+                item["buy_score"] = recommendation.get("buy_score")
+                item["sell_score"] = recommendation.get("sell_score")
                 item["recommendation_confidence"] = recommendation.get("confidence")
                 item["average_sell_through_ratio"] = recommendation.get("average_sell_through_ratio")
                 item["average_sell_through_ratio_bps"] = round(
@@ -98,8 +126,10 @@ class DashboardDataStore:
                 item["vendor_sell_unit_price"] = recommendation.get("vendor_sell_unit_price")
                 item["auction_deposit_unit_price"] = recommendation.get("auction_deposit_unit_price")
                 item["estimated_profit_unit_price"] = recommendation.get("estimated_profit_unit_price")
+                item["sell_profit_unit_price"] = recommendation.get("sell_profit_unit_price")
                 item["price_trend_score"] = recommendation.get("price_trend_score")
                 item["price_trend_ratio"] = recommendation.get("price_trend_ratio")
+                item["recent_min_change_ratio"] = recommendation.get("recent_min_change_ratio")
                 item["best_buy_time"] = recommendation.get("best_buy_time")
                 item["best_sell_time"] = recommendation.get("best_sell_time")
                 item["historical_buy_price"] = recommendation.get("historical_buy_price")
@@ -113,6 +143,7 @@ class DashboardDataStore:
                 _apply_dev_buy_opportunities(items)
             items.sort(
                 key=lambda item: (
+                    int(item.get("buy_score") or 0),
                     int(item.get("recommendation_score") or 0),
                     int(item.get("recommendation_confidence") or 0),
                     int(item.get("average_sell_through_ratio_bps") or 0),
@@ -130,6 +161,8 @@ class DashboardDataStore:
                 "items": items,
                 "latest_lifecycle": self._latest_lifecycle(connection, latest_run["id"] if latest_run else None),
                 "recommendations": recommendations,
+                "buy_recommendations": buy_recommendations,
+                "sell_recommendations": sell_recommendations,
                 "craft_opportunities": self._craft_opportunities(connection, latest_run["id"] if latest_run else None),
                 "player_activity": self._player_activity(connection),
                 "dev_mode": dev_mode,
@@ -626,6 +659,8 @@ def create_dashboard_app(config: DashboardConfig) -> Flask:
     @app.get("/my-auctions")
     @app.get("/profit-loss")
     @app.get("/market")
+    @app.get("/buy")
+    @app.get("/sell")
     @app.get("/stats")
     @app.get("/snapshots")
     def _index() -> Response:
@@ -1692,6 +1727,8 @@ DASHBOARD_HTML = """<!doctype html>
   <nav class="top-tabs">
     <div class="tab-list" role="tablist" aria-label="Dashboard views">
       <button class="tab-button active" id="market-tab" type="button" role="tab" aria-selected="true" aria-controls="market-panel" data-tab="market">Market</button>
+      <button class="tab-button" id="buy-tab" type="button" role="tab" aria-selected="false" aria-controls="buy-panel" data-tab="buy">Buy</button>
+      <button class="tab-button" id="sell-tab" type="button" role="tab" aria-selected="false" aria-controls="sell-panel" data-tab="sell">Sell</button>
       <button class="tab-button" id="snapshots-tab" type="button" role="tab" aria-selected="false" aria-controls="snapshots-panel" data-tab="snapshots">Snapshots</button>
       <button class="tab-button" id="stats-tab" type="button" role="tab" aria-selected="false" aria-controls="stats-panel" data-tab="stats">Fetch Stats</button>
       <button class="tab-button" id="player-tab" type="button" role="tab" aria-selected="false" aria-controls="player-panel" data-tab="player">My Auctions</button>
@@ -1764,6 +1801,58 @@ DASHBOARD_HTML = """<!doctype html>
           </section>
         </div>
       </div>
+    </div>
+
+    <div class="tab-panel" id="buy-panel" role="tabpanel" aria-labelledby="buy-tab" data-panel="buy">
+      <section>
+        <div class="section-head">
+          <h2>Buy Opportunities</h2>
+          <span class="muted">Entries where current price is still below the buy target.</span>
+        </div>
+        <div class="mini-table-wrap">
+          <table class="mini-table">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th>Buy Score</th>
+                <th>Current</th>
+                <th>Buy Target</th>
+                <th>Sell Target</th>
+                <th>Profit / Unit</th>
+                <th>Trend</th>
+                <th>Reasons</th>
+              </tr>
+            </thead>
+            <tbody id="buy-recommendations-table"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <div class="tab-panel" id="sell-panel" role="tabpanel" aria-labelledby="sell-tab" data-panel="sell">
+      <section>
+        <div class="section-head">
+          <h2>Sell Opportunities</h2>
+          <span class="muted">Exit signals from price spikes and current prices near sell targets.</span>
+        </div>
+        <div class="mini-table-wrap">
+          <table class="mini-table">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th>Sell Score</th>
+                <th>Current</th>
+                <th>Sell Target</th>
+                <th>Vs Buy Target</th>
+                <th>Min Change</th>
+                <th>Confidence</th>
+                <th>Reasons</th>
+              </tr>
+            </thead>
+            <tbody id="sell-recommendations-table"></tbody>
+          </table>
+        </div>
+      </section>
     </div>
 
     <div class="tab-panel" id="snapshots-panel" role="tabpanel" aria-labelledby="snapshots-tab" data-panel="snapshots">
@@ -1972,6 +2061,8 @@ DASHBOARD_HTML = """<!doctype html>
       latestTime: document.getElementById('latest-time'),
       items: document.getElementById('items'),
       recommendations: document.getElementById('recommendations'),
+      buyRecommendationsTable: document.getElementById('buy-recommendations-table'),
+      sellRecommendationsTable: document.getElementById('sell-recommendations-table'),
       craftSignalsTable: document.getElementById('craft-signals-table'),
       myListingsNote: document.getElementById('my-listings-note'),
       myListingsTable: document.getElementById('my-listings-table'),
@@ -2009,6 +2100,11 @@ DASHBOARD_HTML = """<!doctype html>
     function bps(value) {
       if (value === null || value === undefined) return '-';
       return `${(value / 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
+    }
+
+    function ratioPercent(value) {
+      if (value === null || value === undefined) return '-';
+      return `${(value * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
     }
 
     function margin(value) {
@@ -2136,6 +2232,7 @@ DASHBOARD_HTML = """<!doctype html>
       document.body.classList.toggle('dev-mode-active', Boolean(overview.dev_mode));
       renderItems();
       renderRecommendations();
+      renderOpportunityTabs();
       renderCraftSignals();
       renderSnapshots();
       renderPlayerActivity();
@@ -2248,6 +2345,49 @@ DASHBOARD_HTML = """<!doctype html>
         </div>`;
       }).join('');
       els.recommendations.querySelectorAll('.recommendation').forEach((row) => {
+        row.addEventListener('click', () => selectItem(Number(row.dataset.itemId)));
+      });
+    }
+
+    function renderOpportunityTabs() {
+      const buyRows = (overview.buy_recommendations || []).filter((item) => {
+        return Number(item.buy_score || 0) > 0 && Number(item.buy_score || 0) >= Number(item.sell_score || 0);
+      });
+      els.buyRecommendationsTable.innerHTML = buyRows.length ? buyRows.map((item) => {
+        const gain = profit(item.estimated_profit_unit_price);
+        const priceTrend = trend(item.price_trend_score);
+        return `<tr data-item-id="${item.item_id}">
+          <td>${itemName(item.name)}<br><span class="muted">#${item.item_id}</span></td>
+          <td><span class="score">${integer(item.buy_score)}</span></td>
+          <td>${gold(item.latest_shifted_unit_price || item.latest_min_unit_price)}</td>
+          <td>${gold(item.recommended_buy_price)}</td>
+          <td>${gold(item.recommended_sell_price)}${sellSourceBadge(item.recommended_sell_price_source)}</td>
+          <td class="${gain.cls}">${gain.text}</td>
+          <td class="${priceTrend.cls}">${integer(item.price_trend_score)}</td>
+          <td>${(item.reasons || []).join('; ')}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="8" class="muted">No current buy opportunities.</td></tr>';
+      els.buyRecommendationsTable.querySelectorAll('tr[data-item-id]').forEach((row) => {
+        row.addEventListener('click', () => selectItem(Number(row.dataset.itemId)));
+      });
+
+      const sellRows = (overview.sell_recommendations || []).filter((item) => {
+        return Number(item.sell_score || 0) > 0 && Number(item.sell_score || 0) > Number(item.buy_score || 0);
+      });
+      els.sellRecommendationsTable.innerHTML = sellRows.length ? sellRows.map((item) => {
+        const gain = profit(item.sell_profit_unit_price);
+        return `<tr data-item-id="${item.item_id}">
+          <td>${itemName(item.name)}<br><span class="muted">#${item.item_id}</span></td>
+          <td><span class="score">${integer(item.sell_score)}</span></td>
+          <td>${gold(item.latest_min_unit_price)}</td>
+          <td>${gold(item.recommended_sell_price)}${sellSourceBadge(item.recommended_sell_price_source)}</td>
+          <td class="${gain.cls}">${gain.text}</td>
+          <td>${ratioPercent(item.recent_min_change_ratio)}</td>
+          <td>${integer(item.confidence)}%</td>
+          <td>${(item.reasons || []).join('; ')}</td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="8" class="muted">No current sell opportunities.</td></tr>';
+      els.sellRecommendationsTable.querySelectorAll('tr[data-item-id]').forEach((row) => {
         row.addEventListener('click', () => selectItem(Number(row.dataset.itemId)));
       });
     }
@@ -2372,6 +2512,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function tabFromPath() {
+      if (window.location.pathname === '/buy') return 'buy';
+      if (window.location.pathname === '/sell') return 'sell';
       if (window.location.pathname === '/my-auctions') return 'player';
       if (window.location.pathname === '/profit-loss') return 'profit';
       if (window.location.pathname === '/stats') return 'stats';
@@ -2380,6 +2522,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
 
     function pathForTab(tabName) {
+      if (tabName === 'buy') return '/buy';
+      if (tabName === 'sell') return '/sell';
       if (tabName === 'snapshots') return '/snapshots';
       if (tabName === 'stats') return '/stats';
       if (tabName === 'profit') return '/profit-loss';

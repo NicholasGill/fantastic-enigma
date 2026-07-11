@@ -537,9 +537,8 @@ def _print_latest_report(overview: dict[str, object], limit: int) -> None:
     for item in items[:limit]:
         if not isinstance(item, dict):
             continue
-        recommendation = _recommendation_for_item(overview, int(item["item_id"]))
-        confidence = recommendation["confidence"] if recommendation else "-"
-        action = recommendation["action"] if recommendation else "-"
+        confidence = item.get("recommendation_confidence") or "-"
+        action = item.get("recommendation_action") or "-"
         print(
             f"{int(item['item_id']):<7}  "
             f"{str(item['name'])[:20]:<20} "
@@ -809,7 +808,6 @@ def _latest_rows_for_export(overview: dict[str, object]) -> list[dict[str, objec
     for item in rows:
         if not isinstance(item, dict):
             continue
-        recommendation = _recommendation_for_item(overview, int(item["item_id"]))
         export_rows.append(
             {
                 "item_id": item["item_id"],
@@ -829,24 +827,24 @@ def _latest_rows_for_export(overview: dict[str, object]) -> list[dict[str, objec
                 "item_class": item.get("item_class"),
                 "item_subclass": item.get("item_subclass"),
                 "icon_url": item.get("icon_url"),
-                "recommendation_action": recommendation["action"] if recommendation else "",
-                "recommendation_score": recommendation["score"] if recommendation else "",
-                "recommendation_confidence": recommendation["confidence"] if recommendation else "",
-                "recommended_buy_price": recommendation["recommended_buy_price"] if recommendation else "",
-                "recommended_sell_price": recommendation["recommended_sell_price"] if recommendation else "",
-                "recommended_buy_unit_price": recommendation["recommended_buy_unit_price"] if recommendation else "",
-                "recommended_sell_unit_price": recommendation["recommended_sell_unit_price"] if recommendation else "",
-                "recommended_sell_price_source": recommendation["recommended_sell_price_source"] if recommendation else "",
-                "vendor_sell_unit_price": recommendation["vendor_sell_unit_price"] if recommendation else "",
-                "auction_deposit_unit_price": recommendation["auction_deposit_unit_price"] if recommendation else "",
-                "estimated_profit_unit_price": recommendation["estimated_profit_unit_price"] if recommendation else "",
-                "price_trend_score": recommendation["price_trend_score"] if recommendation else "",
-                "price_trend_ratio": recommendation["price_trend_ratio"] if recommendation else "",
-                "best_buy_time": recommendation["best_buy_time"] if recommendation else "",
-                "best_sell_time": recommendation["best_sell_time"] if recommendation else "",
-                "historical_buy_price": recommendation["historical_buy_price"] if recommendation else "",
-                "historical_sell_price": recommendation["historical_sell_price"] if recommendation else "",
-                "historical_timing_confidence": recommendation["historical_timing_confidence"] if recommendation else "",
+                "recommendation_action": item.get("recommendation_action", ""),
+                "recommendation_score": item.get("recommendation_score", ""),
+                "recommendation_confidence": item.get("recommendation_confidence", ""),
+                "recommended_buy_price": item.get("recommended_buy_price", ""),
+                "recommended_sell_price": item.get("recommended_sell_price", ""),
+                "recommended_buy_unit_price": item.get("recommended_buy_price", ""),
+                "recommended_sell_unit_price": item.get("recommended_sell_price", ""),
+                "recommended_sell_price_source": item.get("recommended_sell_price_source", ""),
+                "vendor_sell_unit_price": item.get("vendor_sell_unit_price", ""),
+                "auction_deposit_unit_price": item.get("auction_deposit_unit_price", ""),
+                "estimated_profit_unit_price": item.get("estimated_profit_unit_price", ""),
+                "price_trend_score": item.get("price_trend_score", ""),
+                "price_trend_ratio": item.get("price_trend_ratio", ""),
+                "best_buy_time": item.get("best_buy_time", ""),
+                "best_sell_time": item.get("best_sell_time", ""),
+                "historical_buy_price": item.get("historical_buy_price", ""),
+                "historical_sell_price": item.get("historical_sell_price", ""),
+                "historical_timing_confidence": item.get("historical_timing_confidence", ""),
             }
         )
     return export_rows
@@ -970,16 +968,6 @@ def _player_performance_rows_for_export(overview: dict[str, object]) -> list[dic
     if not isinstance(rows, list):
         return []
     return [row for row in rows if isinstance(row, dict)]
-
-
-def _recommendation_for_item(overview: dict[str, object], item_id: int) -> dict[str, object] | None:
-    recommendations = overview.get("recommendations", [])
-    if not isinstance(recommendations, list):
-        return None
-    for recommendation in recommendations:
-        if isinstance(recommendation, dict) and int(recommendation.get("item_id", -1)) == item_id:
-            return recommendation
-    return None
 
 
 def _database_size_label(database_url: str) -> str | None:

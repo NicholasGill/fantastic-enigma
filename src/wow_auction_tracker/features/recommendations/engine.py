@@ -38,6 +38,7 @@ class RecommendationInputs:
     average_total_quantity: float
     price_trend_score: int
     price_trend_ratio: float
+    recent_min_change_ratio: float
     recent_quantity_drop_ratio: float
     average_sell_through_ratio: float
     average_sell_through_confidence: int
@@ -64,6 +65,8 @@ class Recommendation:
     market: str
     action: str
     score: int
+    buy_score: int
+    sell_score: int
     confidence: int
     latest_min_unit_price: int | None
     latest_shifted_unit_price: int | None
@@ -77,6 +80,7 @@ class Recommendation:
     average_weighted_unit_price: int | None
     price_trend_score: int
     price_trend_ratio: float
+    recent_min_change_ratio: float
     estimated_demand_score: int
     average_sell_through_ratio: float
     average_sell_through_confidence: int
@@ -84,6 +88,7 @@ class Recommendation:
     vendor_sell_unit_price: int | None
     auction_deposit_unit_price: int | None
     estimated_profit_unit_price: int | None
+    sell_profit_unit_price: int | None
     player_post_count: int
     player_sold_count: int
     player_expired_count: int
@@ -204,6 +209,7 @@ class RecommendationEngine:
             for row in rows
             if row["weighted_average_unit_price"] is not None or row["median_unit_price"] is not None
         ]
+        min_prices = [int(row["min_unit_price"]) for row in rows if row["min_unit_price"] is not None]
         price_trend_ratio = _price_trend_ratio(trend_prices)
         listing_counts = [int(row["listing_count"]) for row in rows]
         quantities = [int(row["total_quantity"]) for row in rows]
@@ -245,6 +251,7 @@ class RecommendationEngine:
             average_total_quantity=mean(quantities) if quantities else 0.0,
             price_trend_score=_price_trend_score(price_trend_ratio),
             price_trend_ratio=price_trend_ratio,
+            recent_min_change_ratio=_recent_min_change_ratio(min_prices),
             recent_quantity_drop_ratio=_recent_drop_ratio(quantities),
             average_sell_through_ratio=sell_through[0],
             average_sell_through_confidence=sell_through[1],
@@ -275,6 +282,8 @@ class RecommendationEngine:
                 market=inputs.market,
                 action="watch",
                 score=0,
+                buy_score=0,
+                sell_score=0,
                 confidence=_confidence(inputs.snapshots, self.lookback_runs),
                 latest_min_unit_price=inputs.latest_min_unit_price,
                 latest_shifted_unit_price=inputs.latest_shifted_unit_price,
@@ -288,6 +297,7 @@ class RecommendationEngine:
                 average_weighted_unit_price=inputs.average_weighted_unit_price,
                 price_trend_score=inputs.price_trend_score,
                 price_trend_ratio=inputs.price_trend_ratio,
+                recent_min_change_ratio=inputs.recent_min_change_ratio,
                 estimated_demand_score=0,
                 average_sell_through_ratio=inputs.average_sell_through_ratio,
                 average_sell_through_confidence=inputs.average_sell_through_confidence,
@@ -295,6 +305,7 @@ class RecommendationEngine:
                 vendor_sell_unit_price=inputs.vendor_sell_unit_price,
                 auction_deposit_unit_price=inputs.auction_deposit_unit_price,
                 estimated_profit_unit_price=_estimated_profit_unit_price(inputs),
+                sell_profit_unit_price=_sell_profit_unit_price(inputs),
                 player_post_count=inputs.player_post_count,
                 player_sold_count=inputs.player_sold_count,
                 player_expired_count=inputs.player_expired_count,
@@ -320,16 +331,26 @@ class RecommendationEngine:
         if player_confidence > 0:
             demand_score = _player_blended_demand_score(demand_score, inputs.player_sale_rate, player_confidence)
             confidence = max(confidence, player_confidence)
-        base_score = round((price_score * 0.45) + (demand_score * 0.25) + (scarcity_score * 0.15) + (confidence * 0.15))
-        score = base_score + _price_trend_adjustment(inputs.price_trend_score)
-        action = _action_for_score(score)
+        base_buy_score = round(
+            (price_score * 0.45) + (demand_score * 0.25) + (scarcity_score * 0.15) + (confidence * 0.15)
+        )
+        buy_score = _clamp_score(
+            base_buy_score
+            + _buy_price_trend_adjustment(inputs.price_trend_score)
+            - _buy_spike_penalty(inputs.recent_min_change_ratio)
+        )
+        sell_score = _sell_score(inputs, demand_score=demand_score, confidence=confidence)
+        score = max(buy_score, sell_score)
+        action = _action_for_scores(buy_score, sell_score)
 
         return Recommendation(
             item_id=inputs.item_id,
             name=inputs.name,
             market=inputs.market,
             action=action,
-            score=max(0, min(score, 100)),
+            score=score,
+            buy_score=buy_score,
+            sell_score=sell_score,
             confidence=confidence,
             latest_min_unit_price=inputs.latest_min_unit_price,
             latest_shifted_unit_price=inputs.latest_shifted_unit_price,
@@ -343,6 +364,7 @@ class RecommendationEngine:
             average_weighted_unit_price=inputs.average_weighted_unit_price,
             price_trend_score=inputs.price_trend_score,
             price_trend_ratio=inputs.price_trend_ratio,
+            recent_min_change_ratio=inputs.recent_min_change_ratio,
             estimated_demand_score=max(0, min(demand_score, 100)),
             average_sell_through_ratio=inputs.average_sell_through_ratio,
             average_sell_through_confidence=inputs.average_sell_through_confidence,
@@ -350,6 +372,7 @@ class RecommendationEngine:
             vendor_sell_unit_price=inputs.vendor_sell_unit_price,
             auction_deposit_unit_price=inputs.auction_deposit_unit_price,
             estimated_profit_unit_price=_estimated_profit_unit_price(inputs),
+            sell_profit_unit_price=_sell_profit_unit_price(inputs),
             player_post_count=inputs.player_post_count,
             player_sold_count=inputs.player_sold_count,
             player_expired_count=inputs.player_expired_count,
@@ -372,6 +395,8 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "market": recommendation.market,
         "action": recommendation.action,
         "score": recommendation.score,
+        "buy_score": recommendation.buy_score,
+        "sell_score": recommendation.sell_score,
         "confidence": recommendation.confidence,
         "latest_min_unit_price": recommendation.latest_min_unit_price,
         "latest_shifted_unit_price": recommendation.latest_shifted_unit_price,
@@ -387,6 +412,7 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "average_weighted_unit_price": recommendation.average_weighted_unit_price,
         "price_trend_score": recommendation.price_trend_score,
         "price_trend_ratio": recommendation.price_trend_ratio,
+        "recent_min_change_ratio": recommendation.recent_min_change_ratio,
         "estimated_demand_score": recommendation.estimated_demand_score,
         "average_sell_through_ratio": recommendation.average_sell_through_ratio,
         "average_sell_through_confidence": recommendation.average_sell_through_confidence,
@@ -394,6 +420,7 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "vendor_sell_unit_price": recommendation.vendor_sell_unit_price,
         "auction_deposit_unit_price": recommendation.auction_deposit_unit_price,
         "estimated_profit_unit_price": recommendation.estimated_profit_unit_price,
+        "sell_profit_unit_price": recommendation.sell_profit_unit_price,
         "player_post_count": recommendation.player_post_count,
         "player_sold_count": recommendation.player_sold_count,
         "player_expired_count": recommendation.player_expired_count,
@@ -441,8 +468,28 @@ def _price_trend_score(price_trend_ratio: float) -> int:
     return round(max(0.0, min(100.0, 50 + (price_trend_ratio * 100))))
 
 
-def _price_trend_adjustment(price_trend_score: int) -> int:
+def _buy_price_trend_adjustment(price_trend_score: int) -> int:
+    if price_trend_score >= 50:
+        return 0
     return round((price_trend_score - 50) * 0.25)
+
+
+def _buy_spike_penalty(recent_min_change_ratio: float) -> int:
+    if recent_min_change_ratio <= 0:
+        return 0
+    return round(min(recent_min_change_ratio, 1.0) * 50)
+
+
+def _recent_min_change_ratio(prices: list[int]) -> float:
+    prices = [price for price in prices if price > 0]
+    if len(prices) < 2:
+        return 0.0
+
+    latest = prices[-1]
+    previous = next((price for price in reversed(prices[:-1]) if price != latest), prices[-2])
+    if previous <= 0:
+        return 0.0
+    return (latest - previous) / previous
 
 
 def _recommended_sell_price(inputs: RecommendationInputs) -> int | None:
@@ -466,6 +513,41 @@ def _recommended_buy_price(inputs: RecommendationInputs) -> int | None:
     if latest_price is not None and latest_price <= target_buy_price:
         return latest_price
     return target_buy_price
+
+
+def _sell_score(inputs: RecommendationInputs, *, demand_score: int, confidence: int) -> int:
+    current_price = inputs.latest_min_unit_price or _latest_market_unit_price(inputs)
+    if current_price is None:
+        return 0
+
+    target_price = _sell_signal_target_price(inputs)
+    target_score = 0
+    if target_price is not None and target_price > 0:
+        premium_ratio = (current_price - target_price) / target_price
+        if premium_ratio >= 0:
+            target_score = 60 + round(min(premium_ratio, 0.5) * 50)
+        elif premium_ratio >= -0.05:
+            target_score = 45
+
+    spike_score = 0
+    if inputs.recent_min_change_ratio > 0:
+        spike_score = round(min(inputs.recent_min_change_ratio, 1.0) * 100)
+        if target_price is not None and current_price >= round(target_price * 0.95):
+            spike_score += 15
+
+    base_score = max(target_score, spike_score)
+    if base_score <= 0:
+        return 0
+    return _clamp_score(base_score + round(demand_score * 0.10) + round(confidence * 0.10))
+
+
+def _sell_signal_target_price(inputs: RecommendationInputs) -> int | None:
+    return (
+        _recommended_sell_price(inputs)
+        or inputs.historical_sell_price
+        or inputs.average_third_quartile_unit_price
+        or inputs.average_median_unit_price
+    )
 
 
 def _latest_market_unit_price(inputs: RecommendationInputs) -> int | None:
@@ -529,6 +611,14 @@ def _estimated_profit_unit_price(inputs: RecommendationInputs) -> int | None:
     if buy_price is None or sell_price is None:
         return None
     return sell_price - buy_price - (inputs.auction_deposit_unit_price or 0)
+
+
+def _sell_profit_unit_price(inputs: RecommendationInputs) -> int | None:
+    current_price = inputs.latest_min_unit_price or _latest_market_unit_price(inputs)
+    buy_price = _recommended_buy_price(inputs)
+    if current_price is None or buy_price is None:
+        return None
+    return current_price - buy_price - (inputs.auction_deposit_unit_price or 0)
 
 
 def _auction_deposit_unit_price(vendor_sell_price: int | None, duration_hours: int) -> int | None:
@@ -829,10 +919,16 @@ def _confidence(snapshot_count: int, lookback_runs: int) -> int:
     return round(max(0.0, min(snapshot_count / lookback_runs, 1.0)) * 100)
 
 
-def _action_for_score(score: int) -> str:
-    if score >= 60:
+def _clamp_score(score: int) -> int:
+    return max(0, min(score, 100))
+
+
+def _action_for_scores(buy_score: int, sell_score: int) -> str:
+    if sell_score >= 60 and sell_score >= buy_score:
+        return "sell"
+    if buy_score >= 60:
         return "buy"
-    if score >= 35:
+    if max(buy_score, sell_score) >= 35:
         return "watch"
     return "avoid"
 

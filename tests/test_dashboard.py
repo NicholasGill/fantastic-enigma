@@ -103,12 +103,14 @@ def test_dashboard_overview_returns_latest_counts_and_items(tmp_path: Path) -> N
     assert payload["items"][0]["recommended_buy_price"] is None
     assert payload["items"][0]["recommended_sell_price"] is None
     assert payload["items"][0]["recommended_sell_price_source"] is None
+    assert "buy_recommendations" in payload
+    assert "sell_recommendations" in payload
     assert payload["items"][0]["crafting_quality"] == "1"
     assert payload["craft_opportunities"] == []
     assert payload["player_activity"]["summary"]["listing_count"] == 0
 
 
-def test_dashboard_items_default_to_recommendation_score_order(tmp_path: Path) -> None:
+def test_dashboard_items_default_to_buy_score_order(tmp_path: Path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")
     init_db(engine)
@@ -156,7 +158,7 @@ def test_dashboard_items_default_to_recommendation_score_order(tmp_path: Path) -
     payload = DashboardDataStore(f"sqlite:///{db_path}").overview()
 
     assert payload["items"][0]["item_id"] == 210930
-    assert payload["items"][0]["recommendation_score"] > payload["items"][1]["recommendation_score"]
+    assert payload["items"][0]["buy_score"] > payload["items"][1]["buy_score"]
 
 
 def test_dashboard_item_history_returns_rows_in_fetch_order(tmp_path: Path) -> None:
@@ -207,6 +209,8 @@ def test_dashboard_flask_app_serves_html_and_json(tmp_path: Path) -> None:
     player_html_response = client.get("/my-auctions")
     profit_html_response = client.get("/profit-loss")
     snapshots_html_response = client.get("/snapshots")
+    buy_html_response = client.get("/buy")
+    sell_html_response = client.get("/sell")
     overview_response = client.get("/api/overview")
     missing_history_response = client.get("/api/history")
 
@@ -214,10 +218,14 @@ def test_dashboard_flask_app_serves_html_and_json(tmp_path: Path) -> None:
     assert player_html_response.status_code == 200
     assert profit_html_response.status_code == 200
     assert snapshots_html_response.status_code == 200
+    assert buy_html_response.status_code == 200
+    assert sell_html_response.status_code == 200
     assert b"WoW Auction Tracker" in html_response.data
     assert b"My Auctions" in player_html_response.data
     assert b"Profit / Loss" in profit_html_response.data
     assert b"Snapshot Runs" in snapshots_html_response.data
+    assert b"Buy Opportunities" in buy_html_response.data
+    assert b"Sell Opportunities" in sell_html_response.data
     assert overview_response.status_code == 200
     assert overview_response.get_json()["counts"]["fetch_runs"] == 0
     assert missing_history_response.status_code == 400
@@ -930,6 +938,10 @@ def test_dashboard_table_headers_have_tooltips() -> None:
     assert "Profit / Loss" in DASHBOARD_HTML
     assert "Wallet Change" in DASHBOARD_HTML
     assert "Current Gold" in DASHBOARD_HTML
+    assert "Buy Opportunities" in DASHBOARD_HTML
+    assert "Sell Opportunities" in DASHBOARD_HTML
+    assert "buy_recommendations" in DASHBOARD_HTML
+    assert "sell_recommendations" in DASHBOARD_HTML
     assert "Known P/L" in DASHBOARD_HTML
     assert "costBasisLabel" in DASHBOARD_HTML
     assert "setActiveTab" in DASHBOARD_HTML
