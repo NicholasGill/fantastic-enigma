@@ -149,6 +149,21 @@ stay focused on future work.
     target, sell target, potential profit, available quantity at or below buy
     target, recommendation score, confidence, and listing status.
 
+## Backtesting
+
+- [x] Add initial snapshot-history backtesting.
+  - Add `wow-auctions backtest` for a configurable buy-low/sell-target
+    strategy over stored successful snapshots.
+  - Support lookback window, buy discount, sell markup, stop loss, minimum
+    sell-through, max position quantity, max holding runs, starting cash, AH
+    cut, and auction duration settings.
+  - Simulate one open position per item, capital constraints, max available
+    snapshot quantity, auction house cut, deposit estimates, target exits,
+    stop-loss exits, max-holding exits, and mark-to-market open positions.
+  - Report closed trades, open positions, win rate, realized profit,
+    unrealized profit, total return, max drawdown, and average holding runs.
+  - Export summary and trade CSV files.
+
 ## Market Data Platform
 
 - [x] Preserve full raw Blizzard API responses before filtering tracked items.

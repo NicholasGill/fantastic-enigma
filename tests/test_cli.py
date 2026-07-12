@@ -410,6 +410,53 @@ def test_export_crafts_command_writes_csv_stdout(capsys: pytest.CaptureFixture[s
     assert rows[0]["reasons"] == "profitable craft"
 
 
+def test_backtest_command_prints_summary_and_writes_csv(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    output_path = tmp_path / "backtest-summary.csv"
+    trades_path = tmp_path / "backtest-trades.csv"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate({"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]})
+    for index, price in enumerate([100, 100, 100, 70, 120], start=1):
+        run_id = repository.start_fetch_run(config)
+        listings = [
+            AuctionListing(index, 210930, Market.COMMODITY, 10, price, None, None, "LONG", {"id": index})
+        ]
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+        )
+
+    exit_code = main([
+        "--database-url",
+        f"sqlite:///{db_path}",
+        "backtest",
+        "--lookback-runs",
+        "3",
+        "--max-position-quantity",
+        "5",
+        "--starting-cash",
+        "100000",
+        "--output",
+        str(output_path),
+        "--trades-output",
+        str(trades_path),
+    ])
+    captured = capsys.readouterr().out
+    summary_rows = list(csv.DictReader(output_path.read_text(encoding="utf-8").splitlines()))
+    trade_rows = list(csv.DictReader(trades_path.read_text(encoding="utf-8").splitlines()))
+
+    assert exit_code == 0
+    assert "Backtest summary" in captured
+    assert "Closed trades: 1" in captured
+    assert summary_rows[0]["total_profit"] == "220"
+    assert trade_rows[0]["item_id"] == "210930"
+    assert trade_rows[0]["exit_reason"] == "target"
+
+
 def test_recompute_inference_command_updates_probable_sales(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")

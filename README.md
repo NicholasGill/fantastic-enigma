@@ -108,6 +108,13 @@ Show current item recommendations from stored snapshot history:
 uv run wow-auctions recommend --limit 10
 ```
 
+Backtest a simple snapshot-history trading strategy:
+
+```bash
+uv run wow-auctions backtest --lookback-runs 6 --max-position-quantity 20
+uv run wow-auctions backtest --output backtest-summary.csv --trades-output backtest-trades.csv
+```
+
 Show profitable craft signals from the latest snapshot:
 
 ```bash

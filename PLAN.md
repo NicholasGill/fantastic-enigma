@@ -125,25 +125,24 @@ missing scope from a full auction-house quantitative trading system.
 
 ### Backtesting
 
-- [ ] Add a strategy-rule backtesting engine.
-  - Allow strategies to define buy rules, sell rules, max position size,
-    minimum liquidity, and confidence thresholds.
-  - Support rules such as price percentile, discount from median, daily volume,
-    and expected margin.
-
-- [ ] Simulate realistic trade execution.
-  - Account for auction house cut, deposits, failed auctions, partial fills,
-    limited market depth, holding time, capital constraints, relisting behavior,
-    and price slippage.
-  - Avoid assuming every listing can be bought or sold at the minimum displayed
-    price.
-
-- [ ] Report backtest performance.
-  - Show total return, return on invested gold, maximum drawdown, win rate,
-    median holding period, profit per day, capital utilization,
-    risk-adjusted return, and expected-versus-realized profit.
+- [ ] Expand strategy-rule backtesting.
+  - Add reusable named strategies with configurable rule sets.
+  - Support rules such as price percentile, daily volume, expected margin,
+    market-depth bands, and recommendation factor thresholds.
   - Compare strategies against simple baselines such as no-trade and
     buy-and-hold.
+
+- [ ] Improve realistic trade execution simulation.
+  - Account for partial fills by listing price level, limited market depth,
+    failed auctions, relisting behavior, price slippage, and sale probability.
+  - Avoid assuming every listed quantity can be sold at the first-quartile or
+    median displayed price.
+
+- [ ] Expand backtest performance reports.
+  - Show return on invested gold, median holding period, profit per day,
+    capital utilization, risk-adjusted return, and expected-versus-realized
+    profit.
+  - Add dashboard charts for equity curve, drawdown, and trade distribution.
 
 ### Portfolio And Trading Journal
 

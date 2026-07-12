@@ -11,6 +11,13 @@ from sqlalchemy.engine import make_url
 
 from wow_auction_tracker.clients.blizzard import BlizzardClient
 from wow_auction_tracker.config import load_config
+from wow_auction_tracker.features.backtesting import (
+    BacktestEngine,
+    BacktestResult,
+    BacktestStrategy,
+    backtest_result_rows,
+    backtest_trade_rows,
+)
 from wow_auction_tracker.features.dashboard import DashboardConfig, serve_dashboard
 from wow_auction_tracker.features.lifecycle import build_listing_observations
 from wow_auction_tracker.features.player import import_saved_variables
@@ -229,6 +236,79 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Only include outcomes from the last N days.",
     )
+    backtest_parser = subparsers.add_parser("backtest", help="Backtest a simple snapshot-history trading strategy.")
+    backtest_parser.add_argument(
+        "--lookback-runs",
+        type=_positive_int,
+        default=6,
+        help="Historical snapshots used for the rolling baseline. Defaults to 6.",
+    )
+    backtest_parser.add_argument(
+        "--buy-discount-bps",
+        type=_non_negative_int,
+        default=1500,
+        help="Buy when current low is this many basis points below baseline. Defaults to 1500.",
+    )
+    backtest_parser.add_argument(
+        "--sell-markup-bps",
+        type=_non_negative_int,
+        default=1000,
+        help="Sell target markup over baseline in basis points. Defaults to 1000.",
+    )
+    backtest_parser.add_argument(
+        "--stop-loss-bps",
+        type=_non_negative_int,
+        default=2000,
+        help="Exit if sell price falls this many basis points below buy price. Defaults to 2000.",
+    )
+    backtest_parser.add_argument(
+        "--min-sell-through-bps",
+        type=_non_negative_int,
+        default=0,
+        help="Minimum per-snapshot inferred sell-through ratio required to buy. Defaults to 0.",
+    )
+    backtest_parser.add_argument(
+        "--max-position-quantity",
+        type=_positive_int,
+        default=20,
+        help="Maximum quantity to hold per item. Defaults to 20.",
+    )
+    backtest_parser.add_argument(
+        "--max-holding-runs",
+        type=_positive_int,
+        default=8,
+        help="Maximum snapshots to hold before selling at the current sell price. Defaults to 8.",
+    )
+    backtest_parser.add_argument(
+        "--starting-cash",
+        type=_positive_int,
+        default=1_000_000_000,
+        help="Starting cash in copper. Defaults to 1000000000.",
+    )
+    backtest_parser.add_argument(
+        "--ah-cut-bps",
+        type=_non_negative_int,
+        default=500,
+        help="Auction house cut in basis points. Defaults to 500.",
+    )
+    backtest_parser.add_argument(
+        "--auction-duration-hours",
+        type=_positive_int,
+        default=48,
+        help="Auction duration used for deposit estimates. Defaults to 48.",
+    )
+    backtest_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Write one-row backtest summary CSV to this path.",
+    )
+    backtest_parser.add_argument(
+        "--trades-output",
+        type=Path,
+        default=None,
+        help="Write closed trade rows to this CSV path.",
+    )
     import_parser = subparsers.add_parser("import-addon", help="Import companion addon SavedVariables.")
     import_parser.add_argument(
         "--saved-variables",
@@ -336,6 +416,27 @@ def main(argv: list[str] | None = None) -> int:
             display_timezone=args.timezone,
         ).recommend(limit=args.limit)
         _print_recommendations(recommendations)
+        return 0
+
+    if args.command == "backtest":
+        strategy = BacktestStrategy(
+            lookback_runs=args.lookback_runs,
+            buy_discount_bps=args.buy_discount_bps,
+            sell_markup_bps=args.sell_markup_bps,
+            stop_loss_bps=args.stop_loss_bps,
+            min_sell_through_bps=args.min_sell_through_bps,
+            max_position_quantity=args.max_position_quantity,
+            max_holding_runs=args.max_holding_runs,
+            starting_cash=args.starting_cash,
+            ah_cut_bps=args.ah_cut_bps,
+            auction_duration_hours=args.auction_duration_hours,
+        )
+        result = BacktestEngine(args.database_url, strategy).run()
+        if args.output is not None:
+            _write_csv(backtest_result_rows(result), args.output, fieldnames=_BACKTEST_SUMMARY_FIELDNAMES)
+        if args.trades_output is not None:
+            _write_csv(backtest_trade_rows(result), args.trades_output, fieldnames=_BACKTEST_TRADE_FIELDNAMES)
+        _print_backtest_result(result)
         return 0
 
     if args.command == "report":
@@ -705,6 +806,43 @@ def _print_player_report(rows: list[dict[str, object]], limit: int) -> None:
         )
 
 
+def _print_backtest_result(result: BacktestResult) -> None:
+    print("Backtest summary")
+    print(f"Snapshots: {result.snapshot_count}")
+    print(f"Items: {result.item_count}")
+    print(f"Closed trades: {result.closed_trade_count}")
+    print(f"Open positions: {result.open_position_count}")
+    print(f"Win rate: {result.win_rate * 100:.1f}%")
+    print(f"Starting cash: {_format_copper(result.starting_cash)}")
+    print(f"Ending equity: {_format_copper(result.ending_cash)}")
+    print(f"Realized profit: {_format_copper(result.realized_profit)}")
+    print(f"Unrealized profit: {_format_copper(result.unrealized_profit)}")
+    print(f"Total profit: {_format_copper(result.total_profit)}")
+    print(f"Return: {result.return_bps / 100:.2f}%")
+    print(f"Max drawdown: {_format_copper(result.max_drawdown)} ({result.max_drawdown_bps / 100:.2f}%)")
+    print(f"Average holding runs: {result.average_holding_runs:.1f}")
+    if not result.trades:
+        print("No trades executed")
+        return
+
+    print()
+    print("Item ID  Name                 Qty  Buy Run  Sell Run  Buy/Unit  Sell/Unit  Profit    Exit")
+    for trade in result.trades[:20]:
+        print(
+            f"{trade.item_id:<7}  "
+            f"{trade.name[:20]:<20} "
+            f"{trade.quantity:>3}  "
+            f"{trade.buy_run_id:<7}  "
+            f"{str(trade.sell_run_id or '-'):<8} "
+            f"{_format_copper(trade.buy_unit_price):>9}  "
+            f"{_format_copper(trade.sell_unit_price):>9}  "
+            f"{_format_copper(trade.net_profit):>8}  "
+            f"{trade.exit_reason}"
+        )
+    if len(result.trades) > 20:
+        print(f"... {len(result.trades) - 20} more trade(s)")
+
+
 _LATEST_EXPORT_FIELDNAMES = [
     "item_id",
     "name",
@@ -836,6 +974,44 @@ _PLAYER_PERFORMANCE_EXPORT_FIELDNAMES = [
     "average_time_to_sale_seconds",
     "average_time_to_expiry_seconds",
     "average_match_confidence",
+]
+_BACKTEST_SUMMARY_FIELDNAMES = [
+    "snapshot_count",
+    "item_count",
+    "trade_count",
+    "closed_trade_count",
+    "open_position_count",
+    "winning_trade_count",
+    "losing_trade_count",
+    "win_rate_bps",
+    "starting_cash",
+    "ending_cash",
+    "realized_profit",
+    "unrealized_profit",
+    "total_profit",
+    "return_bps",
+    "max_drawdown",
+    "max_drawdown_bps",
+    "average_holding_runs",
+]
+_BACKTEST_TRADE_FIELDNAMES = [
+    "item_id",
+    "name",
+    "market",
+    "buy_run_id",
+    "buy_started_at",
+    "sell_run_id",
+    "sell_started_at",
+    "quantity",
+    "buy_unit_price",
+    "target_unit_price",
+    "sell_unit_price",
+    "gross_profit",
+    "auction_cut",
+    "deposit_cost",
+    "net_profit",
+    "holding_runs",
+    "exit_reason",
 ]
 
 
