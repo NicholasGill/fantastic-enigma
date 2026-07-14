@@ -689,9 +689,9 @@ def _load_sell_through_inputs(
     )
 
     return (
-        mean(int(row["sell_through_ratio_bps"]) / 10000 for row in rows),
-        round(mean(int(row["confidence"]) for row in rows)),
-        int(mean(probable_sold_prices)) if probable_sold_prices else None,
+        _weighted_recent_average([int(row["sell_through_ratio_bps"]) / 10000 for row in rows]),
+        round(_weighted_recent_average([int(row["confidence"]) for row in rows])),
+        int(_weighted_recent_average(probable_sold_prices)) if probable_sold_prices else None,
     )
 
 
@@ -709,15 +709,33 @@ def _without_price_outliers(prices: list[int]) -> list[int]:
     return filtered or prices
 
 
+def _weighted_recent_average(values: list[float | int]) -> float:
+    if not values:
+        return 0.0
+
+    total_weight = 0
+    weighted_total = 0.0
+    count = len(values)
+    for index, value in enumerate(values):
+        weight = count - index
+        weighted_total += float(value) * weight
+        total_weight += weight
+    return weighted_total / total_weight
+
+
 def _load_player_outcome_inputs(connection: sqlite3.Connection, item_id: int) -> dict[str, Any]:
     if not _table_exists(connection, "player_auction_outcomes"):
         return _empty_player_outcomes()
 
     outcome_rows = connection.execute(
         """
-        select outcome, money
+        select outcome, money, observed_at, id
         from player_auction_outcomes
         where item_id = ?
+        order by
+            case when observed_at is null then 1 else 0 end,
+            observed_at desc,
+            id desc
         """,
         (item_id,),
     ).fetchall()
@@ -734,7 +752,7 @@ def _load_player_outcome_inputs(connection: sqlite3.Connection, item_id: int) ->
     known_outcomes = sold_count + expired_count + cancelled_count
     net_proceeds = [int(row["money"]) for row in outcome_rows if row["outcome"] == "sold" and row["money"] is not None]
     denominator = post_count if post_count > 0 else known_outcomes
-    sale_rate = sold_count / denominator if denominator > 0 else 0.0
+    sale_rate = _weighted_player_sale_rate(outcome_rows, denominator)
     return {
         "post_count": post_count,
         "sold_count": sold_count,
@@ -743,6 +761,19 @@ def _load_player_outcome_inputs(connection: sqlite3.Connection, item_id: int) ->
         "sale_rate": sale_rate,
         "average_net_proceeds": int(mean(net_proceeds)) if net_proceeds else None,
     }
+
+
+def _weighted_player_sale_rate(outcome_rows: list[sqlite3.Row], denominator: int) -> float:
+    if denominator <= 0 or not outcome_rows:
+        return 0.0
+
+    weights = [len(outcome_rows) - index for index, _row in enumerate(outcome_rows)]
+    average_weight = mean(weights)
+    weighted_sold_equivalent = 0.0
+    for row, weight in zip(outcome_rows, weights, strict=True):
+        if row["outcome"] == "sold":
+            weighted_sold_equivalent += weight / average_weight
+    return max(0.0, min(weighted_sold_equivalent / denominator, 1.0))
 
 
 def _empty_player_outcomes() -> dict[str, Any]:
