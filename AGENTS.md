@@ -35,6 +35,7 @@ Use `uv` for dependency management and command execution.
   item summaries to CSV.
 - `uv run wow-auctions schedule --interval-minutes 30`: fetch snapshots on a
   fixed interval.
+- `uv run --extra dev ruff check .`: lint the Python codebase.
 - `uv run --extra dev pytest`: run the full test suite.
 
 Before opening a pull request, run every command that applies to the files you changed.

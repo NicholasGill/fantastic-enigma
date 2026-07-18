@@ -12,6 +12,13 @@ Install dependencies with `uv`:
 uv sync --extra dev
 ```
 
+Run the same lint and unit-test checks used by CI:
+
+```bash
+uv run --extra dev ruff check .
+uv run --extra dev pytest
+```
+
 Create a local config from the example:
 
 ```bash

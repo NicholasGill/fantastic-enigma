@@ -235,7 +235,7 @@ missing scope from a full auction-house quantitative trading system.
 
 - [ ] Add infrastructure and CI/CD.
   - Add Terraform for cloud resources.
-  - Add GitHub Actions for tests, linting, packaging, and deployment.
+  - Add GitHub Actions for deployment.
   - Add migration tooling before relying on non-SQLite production databases.
 
 - [ ] Add observability and reliability hardening.

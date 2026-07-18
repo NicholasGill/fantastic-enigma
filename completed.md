@@ -3,6 +3,13 @@
 This file records completed features moved out of `PLAN.md` so the plan can
 stay focused on future work.
 
+## Engineering
+
+- [x] Add GitHub Actions for Python linting and unit tests.
+  - Run Ruff and pytest for pushes and pull requests with Python 3.12 and the
+    locked `uv` development environment.
+  - Build package artifacts after successful main-branch checks.
+
 ## Snapshot Inference Features
 
 - [x] Store item metadata from Blizzard item and media endpoints.
