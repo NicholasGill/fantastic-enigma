@@ -64,13 +64,20 @@ auction count, and item count. Override the raw snapshot directory with
 Run snapshots repeatedly at a fixed interval:
 
 ```bash
-uv run wow-auctions schedule --interval-minutes 30
+uv run wow-auctions schedule --interval-minutes 10
 ```
 
 For a bounded run, add `--max-runs`:
 
 ```bash
-uv run wow-auctions schedule --interval-minutes 30 --max-runs 8
+uv run wow-auctions schedule --interval-minutes 10 --max-runs 8
+```
+
+Start scheduled snapshots and the dashboard together. The startup script uses
+a 10-minute interval by default:
+
+```bash
+scripts/start-local.sh
 ```
 
 By default, data is written to `data/auction_tracker.sqlite3`. Override it with:

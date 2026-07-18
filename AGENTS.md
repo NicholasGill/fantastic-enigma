@@ -33,7 +33,7 @@ Use `uv` for dependency management and command execution.
   history.
 - `uv run wow-auctions export latest --output latest.csv`: export the latest
   item summaries to CSV.
-- `uv run wow-auctions schedule --interval-minutes 30`: fetch snapshots on a
+- `uv run wow-auctions schedule --interval-minutes 10`: fetch snapshots on a
   fixed interval.
 - `uv run --extra dev ruff check .`: lint the Python codebase.
 - `uv run --extra dev pytest`: run the full test suite.

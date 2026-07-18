@@ -11,7 +11,7 @@ if [[ -f .env ]]; then
   set +a
 fi
 
-INTERVAL_MINUTES="${WAT_INTERVAL_MINUTES:-30}"
+INTERVAL_MINUTES="${WAT_INTERVAL_MINUTES:-10}"
 DASHBOARD_HOST="${WAT_DASHBOARD_HOST:-127.0.0.1}"
 DASHBOARD_PORT="${WAT_DASHBOARD_PORT:-8000}"
 CONFIG_PATH="${WAT_CONFIG:-config/items.yaml}"
@@ -27,7 +27,7 @@ Usage: scripts/start-local.sh [options]
 Start scheduled auction ingest and the local dashboard together.
 
 Options:
-  --interval-minutes N       Ingest interval in minutes. Default: 30.
+  --interval-minutes N       Ingest interval in minutes. Default: 10.
   --host HOST                Dashboard host. Default: 127.0.0.1.
   --port PORT                Dashboard port. Default: 8000.
   --config PATH              Item config path. Default: config/items.yaml.
