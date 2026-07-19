@@ -16,8 +16,9 @@ stay focused on future work.
   - Link dashboard market, buy, sell, and recommendation rows to one item page.
   - Show current quartile prices, price and quantity history, and selectable
     24-hour, 7-day, 30-day, and all-history ranges.
-  - Smooth price history with a five-snapshot median and outlier-resistant scale
-    while retaining a raw-data chart mode and the original snapshot values.
+  - Smooth price history with range-aware rolling medians and an
+    outlier-resistant scale while retaining a raw-data chart mode and the
+    original snapshot values.
   - Aggregate first-quartile, median, and third-quartile prices by local hour
     and weekday.
   - Include sell-through estimates, current recommendation explanations,

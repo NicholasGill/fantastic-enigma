@@ -17,6 +17,7 @@ from wow_auction_tracker.features.dashboard.server import (
     _dashboard_timezone,
     _has_buy_opportunity,
     _smooth_item_history,
+    _smoothed_price_histories,
     create_dashboard_app,
     format_file_size,
 )
@@ -262,11 +263,33 @@ def test_item_history_smoothing_removes_one_snapshot_spikes_and_keeps_sustained_
 
     smoothed = _smooth_item_history(history)
 
-    assert smoothed[3]["smoothed_third_quartile_unit_price"] == 10000
-    assert smoothed[7]["smoothed_median_unit_price"] == 20000
-    assert smoothed[-1]["smoothed_first_quartile_unit_price"] == 20000
+    assert smoothed[3]["third_quartile_unit_price"] == 10000
+    assert smoothed[7]["median_unit_price"] == 20000
+    assert smoothed[-1]["first_quartile_unit_price"] == 20000
     assert history[3]["third_quartile_unit_price"] == 400_000_000
-    assert "smoothed_third_quartile_unit_price" not in history[3]
+
+
+def test_item_history_uses_stronger_smoothing_for_longer_ranges() -> None:
+    prices = ([10000] * 30) + ([1_000_000] * 12) + ([10000] * 30) + ([20000] * 48)
+    history = [
+        {
+            "started_at_epoch": index * 600,
+            "display_time": f"Snapshot {index}",
+            "first_quartile_unit_price": price,
+            "median_unit_price": price,
+            "third_quartile_unit_price": price,
+        }
+        for index, price in enumerate(prices)
+    ]
+
+    smoothed = _smoothed_price_histories(history)
+
+    assert smoothed["24"][35]["third_quartile_unit_price"] == 1_000_000
+    assert smoothed["168"][35]["third_quartile_unit_price"] == 10000
+    assert smoothed["720"][35]["third_quartile_unit_price"] == 10000
+    assert smoothed["168"][-1]["median_unit_price"] == 20000
+    assert smoothed["720"][-1]["median_unit_price"] == 20000
+    assert history[35]["third_quartile_unit_price"] == 1_000_000
 
 
 def test_dashboard_serves_item_page_api_empty_state_and_not_found(tmp_path: Path) -> None:
@@ -295,12 +318,13 @@ def test_dashboard_serves_item_page_api_empty_state_and_not_found(tmp_path: Path
     assert page_response.status_code == 200
     assert b"Price by Hour of Day" in page_response.data
     assert b"Price by Day of Week" in page_response.data
-    assert b"Five-snapshot median with an outlier-resistant scale" in page_response.data
+    assert b"Adaptive rolling median; raw values remain available" in page_response.data
     assert b'data-mode="raw"' in page_response.data
     assert b"robustUpper" in page_response.data
     assert api_response.status_code == 200
     assert api_response.get_json()["item"]["name"] == "Bismuth"
     assert api_response.get_json()["summary"]["snapshot_count"] == 0
+    assert api_response.get_json()["smoothed_price_history"]["168"] == []
     assert api_response.get_json()["time_of_day"][0]["snapshot_count"] == 0
     assert missing_page_response.status_code == 404
     assert missing_api_response.status_code == 404

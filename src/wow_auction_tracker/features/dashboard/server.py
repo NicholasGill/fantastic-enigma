@@ -315,14 +315,13 @@ class DashboardDataStore:
                 (item_id,),
             ).fetchall()
 
-        history = _smooth_item_history(
-            [_item_detail_history_row(dict(row), timezone_name) for row in rows]
-        )
+        history = [_item_detail_history_row(dict(row), timezone_name) for row in rows]
         recommendation = _item_recommendation(self.database_url, item_id, timezone_name)
         return {
             "item": dict(item),
             "summary": _item_detail_summary(history),
             "history": history,
+            "smoothed_price_history": _smoothed_price_histories(history),
             "time_of_day": _item_history_by_hour(history),
             "day_of_week": _item_history_by_weekday(history),
             "recommendation": recommendation,
@@ -928,8 +927,67 @@ def _smooth_item_history(
         neighbors = history[start:end]
         for key in price_keys:
             values = [int(neighbor[key]) for neighbor in neighbors if neighbor.get(key) is not None]
-            row[f"smoothed_{key}"] = round(median(values)) if values else None
+            row[key] = round(median(values)) if values else None
     return smoothed
+
+
+def _smoothed_price_histories(history: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    range_windows: tuple[tuple[str, int | None, int], ...] = (
+        ("24", 24, 5),
+        ("168", 168, 49),
+        ("720", 720, 73),
+        ("all", None, 97),
+    )
+    return {
+        key: _downsample_price_history(
+            _smooth_item_history(_price_history_for_hours(history, hours), window_size=window_size)
+        )
+        for key, hours, window_size in range_windows
+    }
+
+
+def _price_history_for_hours(
+    history: list[dict[str, Any]],
+    hours: int | None,
+) -> list[dict[str, Any]]:
+    if not history:
+        return []
+    cutoff = None if hours is None else int(history[-1]["started_at_epoch"]) - (hours * 60 * 60)
+    return [
+        {
+            "started_at_epoch": row["started_at_epoch"],
+            "display_time": row["display_time"],
+            "first_quartile_unit_price": row.get("first_quartile_unit_price"),
+            "median_unit_price": row.get("median_unit_price"),
+            "third_quartile_unit_price": row.get("third_quartile_unit_price"),
+        }
+        for row in history
+        if cutoff is None or int(row["started_at_epoch"]) >= cutoff
+    ]
+
+
+def _downsample_price_history(
+    history: list[dict[str, Any]],
+    *,
+    maximum_points: int = 600,
+) -> list[dict[str, Any]]:
+    if len(history) <= maximum_points:
+        return history
+    bucket_size = (len(history) + maximum_points - 1) // maximum_points
+    price_keys = (
+        "first_quartile_unit_price",
+        "median_unit_price",
+        "third_quartile_unit_price",
+    )
+    sampled: list[dict[str, Any]] = []
+    for start in range(0, len(history), bucket_size):
+        bucket = history[start : start + bucket_size]
+        representative = dict(bucket[len(bucket) // 2])
+        for key in price_keys:
+            values = [int(row[key]) for row in bucket if row.get(key) is not None]
+            representative[key] = round(median(values)) if values else None
+        sampled.append(representative)
+    return sampled
 
 
 def _item_detail_summary(history: list[dict[str, Any]]) -> dict[str, Any]:

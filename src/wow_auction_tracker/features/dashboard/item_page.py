@@ -246,7 +246,7 @@ ITEM_DETAIL_HTML = """<!doctype html>
         <div class="section-head">
           <div>
             <h2>Price History</h2>
-            <div class="section-note" id="price-chart-note">Five-snapshot median with an outlier-resistant scale</div>
+            <div class="section-note" id="price-chart-note">Adaptive rolling median; raw values remain available</div>
           </div>
           <div class="chart-controls">
             <div class="mode-controls" aria-label="Price chart smoothing">
@@ -473,18 +473,23 @@ ITEM_DETAIL_HTML = """<!doctype html>
       return rows.filter((row) => Number(row.started_at_epoch) >= cutoff);
     }
 
+    function smoothedHistoryForRange() {
+      const rangeKey = rangeHours === 'all' ? 'all' : String(rangeHours);
+      return detail.smoothed_price_history?.[rangeKey] || historyForRange();
+    }
+
     function renderCharts() {
-      const rows = historyForRange();
-      const priceKey = (key) => priceMode === 'smoothed' ? `smoothed_${key}` : key;
+      const rawRows = historyForRange();
+      const priceRows = priceMode === 'smoothed' ? smoothedHistoryForRange() : rawRows;
       els.priceChartNote.textContent = priceMode === 'smoothed'
-        ? 'Five-snapshot median with an outlier-resistant scale'
+        ? 'Adaptive rolling median; raw values remain available'
         : 'Raw quartile values for every recorded snapshot';
-      drawLineChart('price-history', 'price-history-legend', rows, [
-        { key: priceKey('first_quartile_unit_price'), label: 'First quartile', color: colors.q1 },
-        { key: priceKey('median_unit_price'), label: 'Median', color: colors.median },
-        { key: priceKey('third_quartile_unit_price'), label: 'Third quartile', color: colors.q3 }
+      drawLineChart('price-history', 'price-history-legend', priceRows, [
+        { key: 'first_quartile_unit_price', label: 'First quartile', color: colors.q1 },
+        { key: 'median_unit_price', label: 'Median', color: colors.median },
+        { key: 'third_quartile_unit_price', label: 'Third quartile', color: colors.q3 }
       ], gold, (row) => row.display_time, { robustUpper: priceMode === 'smoothed' });
-      drawLineChart('quantity-history', 'quantity-history-legend', rows, [
+      drawLineChart('quantity-history', 'quantity-history-legend', rawRows, [
         { key: 'total_quantity', label: 'Available quantity', color: colors.quantity }
       ], integer, (row) => row.display_time);
       drawLineChart('hour-history', 'hour-history-legend', detail.time_of_day || [], [
