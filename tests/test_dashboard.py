@@ -337,9 +337,12 @@ def test_dashboard_serves_item_page_api_empty_state_and_not_found(tmp_path: Path
     assert page_response.status_code == 200
     assert b"Price by Hour of Day" in page_response.data
     assert b"Price by Day of Week" in page_response.data
-    assert b"Typical snapshot prices in the selected timezone" in page_response.data
-    assert b"typical_third_quartile_unit_price" in page_response.data
-    assert b"Adaptive rolling median; raw values remain available" in page_response.data
+    assert b"Typical median price in the selected timezone" in page_response.data
+    assert b"typical_median_unit_price" in page_response.data
+    assert b"typical_third_quartile_unit_price" not in page_response.data
+    assert b"Median listing price with adaptive smoothing" in page_response.data
+    assert b"label: 'First quartile'" not in page_response.data
+    assert b"label: 'Third quartile'" not in page_response.data
     assert b'data-mode="raw"' in page_response.data
     assert b"robustUpper" in page_response.data
     assert api_response.status_code == 200

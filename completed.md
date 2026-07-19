@@ -19,6 +19,8 @@ stay focused on future work.
   - Smooth price history with range-aware rolling medians and an
     outlier-resistant scale while retaining a raw-data chart mode and the
     original snapshot values.
+  - Keep item-page price charts focused on one median series while retaining
+    quartile cards and raw snapshot columns for deeper inspection.
   - Aggregate first-quartile, median, and third-quartile prices by local hour
     and weekday, using median bucket values for outlier-resistant charts.
   - Include sell-through estimates, current recommendation explanations,

@@ -246,7 +246,7 @@ ITEM_DETAIL_HTML = """<!doctype html>
         <div class="section-head">
           <div>
             <h2>Price History</h2>
-            <div class="section-note" id="price-chart-note">Adaptive rolling median; raw values remain available</div>
+            <div class="section-note" id="price-chart-note">Median listing price with adaptive smoothing</div>
           </div>
           <div class="chart-controls">
             <div class="mode-controls" aria-label="Price chart smoothing">
@@ -276,7 +276,7 @@ ITEM_DETAIL_HTML = """<!doctype html>
       </section>
 
       <section>
-        <div class="section-head"><div><h2>Price by Hour of Day</h2><div class="section-note">Typical snapshot prices in the selected timezone</div></div></div>
+        <div class="section-head"><div><h2>Price by Hour of Day</h2><div class="section-note">Typical median price in the selected timezone</div></div></div>
         <div class="chart-body">
           <canvas id="hour-history" width="760" height="320"></canvas>
           <div class="legend" id="hour-history-legend"></div>
@@ -284,7 +284,7 @@ ITEM_DETAIL_HTML = """<!doctype html>
       </section>
 
       <section class="chart-wide">
-        <div class="section-head"><div><h2>Price by Day of Week</h2><div class="section-note">Typical snapshot prices for Monday through Sunday</div></div></div>
+        <div class="section-head"><div><h2>Price by Day of Week</h2><div class="section-note">Typical median price for Monday through Sunday</div></div></div>
         <div class="chart-body">
           <canvas id="weekday-history" width="1200" height="320"></canvas>
           <div class="legend" id="weekday-history-legend"></div>
@@ -482,25 +482,19 @@ ITEM_DETAIL_HTML = """<!doctype html>
       const rawRows = historyForRange();
       const priceRows = priceMode === 'smoothed' ? smoothedHistoryForRange() : rawRows;
       els.priceChartNote.textContent = priceMode === 'smoothed'
-        ? 'Adaptive rolling median; raw values remain available'
-        : 'Raw quartile values for every recorded snapshot';
+        ? 'Median listing price with adaptive smoothing'
+        : 'Raw median listing price for every recorded snapshot';
       drawLineChart('price-history', 'price-history-legend', priceRows, [
-        { key: 'first_quartile_unit_price', label: 'First quartile', color: colors.q1 },
-        { key: 'median_unit_price', label: 'Median', color: colors.median },
-        { key: 'third_quartile_unit_price', label: 'Third quartile', color: colors.q3 }
+        { key: 'median_unit_price', label: 'Median price', color: colors.median }
       ], gold, (row) => row.display_time, { robustUpper: priceMode === 'smoothed' });
       drawLineChart('quantity-history', 'quantity-history-legend', rawRows, [
         { key: 'total_quantity', label: 'Available quantity', color: colors.quantity }
       ], integer, (row) => row.display_time);
       drawLineChart('hour-history', 'hour-history-legend', detail.time_of_day || [], [
-        { key: 'typical_first_quartile_unit_price', label: 'Typical Q1', color: colors.q1 },
-        { key: 'typical_median_unit_price', label: 'Typical median', color: colors.median },
-        { key: 'typical_third_quartile_unit_price', label: 'Typical Q3', color: colors.q3 }
+        { key: 'typical_median_unit_price', label: 'Typical median price', color: colors.median }
       ], gold, (row) => row.label);
       drawLineChart('weekday-history', 'weekday-history-legend', detail.day_of_week || [], [
-        { key: 'typical_first_quartile_unit_price', label: 'Typical Q1', color: colors.q1 },
-        { key: 'typical_median_unit_price', label: 'Typical median', color: colors.median },
-        { key: 'typical_third_quartile_unit_price', label: 'Typical Q3', color: colors.q3 }
+        { key: 'typical_median_unit_price', label: 'Typical median price', color: colors.median }
       ], gold, (row) => row.label);
     }
 
