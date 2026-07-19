@@ -21,6 +21,8 @@ stay focused on future work.
     original snapshot values.
   - Keep item-page price charts focused on one median series while retaining
     quartile cards and raw snapshot columns for deeper inspection.
+  - Show the seven most recent local calendar dates in the 7-day range and
+    label every date and weekday on their respective charts.
   - Aggregate first-quartile, median, and third-quartile prices by local hour
     and weekday, using median bucket values for outlier-resistant charts.
   - Include sell-through estimates, current recommendation explanations,
@@ -29,6 +31,14 @@ stay focused on future work.
     recommendation prices to keep tab loading fast as history grows.
 
 ## Snapshot Inference Features
+
+- [x] Make snapshot pricing resistant to disconnected auction tiers.
+  - Split sufficiently populated listing samples at price jumps greater than
+    2x and derive quartiles, median, and weighted average from the densest band.
+  - Preserve raw listing counts, total quantity, and the actual minimum listing
+    price so filtered analytics do not hide available auctions.
+  - Leave sparse samples unchanged and prefer the lower band on equal-density
+    ties to keep estimates conservative.
 
 - [x] Store item metadata from Blizzard item and media endpoints.
   - Capture item name, quality, class, subclass, item level, stackability, vendor

@@ -105,13 +105,21 @@ sell-through estimates, recommendation reasons, anomalies, and imported player
 outcomes. Price charts display only the median listing price. Price history uses
 range-aware smoothing and an outlier-resistant vertical scale by default;
 longer views use stronger smoothing so brief listing spikes do not flatten the
-chart. Use **Raw** to inspect the unsmoothed median series. Hour-of-day and
-weekday charts use the median snapshot price in each bucket so temporary
-extremes do not distort the typical time pattern.
+chart. The 7-day range uses the seven most recent calendar dates in the selected
+timezone, labels every date, and spaces points by their actual timestamps so
+collection gaps remain visible. Use **Raw** to inspect the unsmoothed median
+series. Hour-of-day and weekday charts use the median snapshot price in each
+bucket so temporary extremes do not distort the typical time pattern; the
+weekday chart labels all seven days.
 
 Stored price summaries include minimum, first quartile, median, and third
-quartile unit prices. The dashboard emphasizes minimum, buy, sell, deposit, and
-net profit per unit so the active view stays focused on flip decisions.
+quartile unit prices. Quartiles, median, and weighted-average market prices use
+the densest contiguous listing-price band, split at jumps greater than 2x. This
+keeps isolated bait listings and disconnected high-price walls from defining
+the typical market while retaining raw listing counts, total quantity, and the
+actual minimum price. Sparse samples are not filtered. The dashboard emphasizes
+minimum, buy, sell, deposit, and net profit per unit so the active view stays
+focused on flip decisions.
 
 Snapshot fetches also collect missing item metadata from Blizzard's item and
 media endpoints, including item quality, class, subclass, stackability, vendor

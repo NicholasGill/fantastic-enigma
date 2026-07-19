@@ -293,6 +293,24 @@ def test_item_history_uses_stronger_smoothing_for_longer_ranges() -> None:
     assert history[35]["third_quartile_unit_price"] == 1_000_000
 
 
+def test_seven_day_smoothed_history_includes_a_calendar_day_boundary_buffer() -> None:
+    history = [
+        {
+            "started_at_epoch": hour * 60 * 60,
+            "display_time": f"Hour {hour}",
+            "first_quartile_unit_price": 100,
+            "median_unit_price": 110,
+            "third_quartile_unit_price": 120,
+        }
+        for hour in range(201)
+    ]
+
+    smoothed = _smoothed_price_histories(history)
+
+    assert smoothed["168"][0]["started_at_epoch"] == 8 * 60 * 60
+    assert smoothed["168"][-1]["started_at_epoch"] == 200 * 60 * 60
+
+
 def test_item_time_bucket_keeps_averages_and_adds_outlier_resistant_typical_prices() -> None:
     rows = [
         {
@@ -343,6 +361,11 @@ def test_dashboard_serves_item_page_api_empty_state_and_not_found(tmp_path: Path
     assert b"Median listing price with adaptive smoothing" in page_response.data
     assert b"label: 'First quartile'" not in page_response.data
     assert b"label: 'Third quartile'" not in page_response.data
+    assert b"function lastSevenCalendarDays" in page_response.data
+    assert b"function sevenDayAxisLabels" in page_response.data
+    assert b"axisLabels: weekAxisLabels" in page_response.data
+    assert b"labelEveryPoint: true" in page_response.data
+    assert b"timeScale: true" in page_response.data
     assert b'data-mode="raw"' in page_response.data
     assert b"robustUpper" in page_response.data
     assert api_response.status_code == 200

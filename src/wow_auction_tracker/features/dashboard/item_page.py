@@ -468,6 +468,7 @@ ITEM_DETAIL_HTML = """<!doctype html>
     function historyForRange() {
       const rows = detail.history || [];
       if (rangeHours === 'all' || !rows.length) return rows;
+      if (rangeHours === 168) return lastSevenCalendarDays(rows);
       const latest = Number(rows[rows.length - 1].started_at_epoch);
       const cutoff = latest - (Number(rangeHours) * 60 * 60);
       return rows.filter((row) => Number(row.started_at_epoch) >= cutoff);
@@ -475,27 +476,80 @@ ITEM_DETAIL_HTML = """<!doctype html>
 
     function smoothedHistoryForRange() {
       const rangeKey = rangeHours === 'all' ? 'all' : String(rangeHours);
-      return detail.smoothed_price_history?.[rangeKey] || historyForRange();
+      const rows = detail.smoothed_price_history?.[rangeKey] || historyForRange();
+      return rangeHours === 168 ? lastSevenCalendarDays(rows) : rows;
+    }
+
+    function calendarDateKey(row) {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: detail.display_timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+      }).formatToParts(new Date(Number(row.started_at_epoch) * 1000));
+      const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+      return `${values.year}-${values.month}-${values.day}`;
+    }
+
+    function calendarDateLabel(row) {
+      return new Intl.DateTimeFormat(undefined, {
+        timeZone: detail.display_timezone,
+        month: 'short',
+        day: 'numeric'
+      }).format(new Date(Number(row.started_at_epoch) * 1000));
+    }
+
+    function lastSevenCalendarDays(rows) {
+      const includedDates = new Set(sevenDayAxisLabels(rows).map((tick) => tick.key));
+      return rows.filter((row) => includedDates.has(calendarDateKey(row)));
+    }
+
+    function sevenDayAxisLabels(rows) {
+      if (!rows.length) return [];
+      const [year, month, day] = calendarDateKey(rows[rows.length - 1]).split('-').map(Number);
+      const latestDate = Date.UTC(year, month - 1, day);
+      const labelFormatter = new Intl.DateTimeFormat(undefined, {
+        timeZone: 'UTC',
+        month: 'short',
+        day: 'numeric'
+      });
+      return Array.from({ length: 7 }, (_, index) => {
+        const date = new Date(latestDate - ((6 - index) * 24 * 60 * 60 * 1000));
+        return {
+          key: date.toISOString().slice(0, 10),
+          label: labelFormatter.format(date),
+          fraction: index / 6
+        };
+      });
     }
 
     function renderCharts() {
       const rawRows = historyForRange();
       const priceRows = priceMode === 'smoothed' ? smoothedHistoryForRange() : rawRows;
+      const historyLabel = rangeHours === 168 ? calendarDateLabel : (row) => row.display_time;
+      const weekAxisLabels = rangeHours === 168 ? sevenDayAxisLabels(detail.history || []) : undefined;
       els.priceChartNote.textContent = priceMode === 'smoothed'
         ? 'Median listing price with adaptive smoothing'
         : 'Raw median listing price for every recorded snapshot';
       drawLineChart('price-history', 'price-history-legend', priceRows, [
         { key: 'median_unit_price', label: 'Median price', color: colors.median }
-      ], gold, (row) => row.display_time, { robustUpper: priceMode === 'smoothed' });
+      ], gold, historyLabel, {
+        robustUpper: priceMode === 'smoothed',
+        timeScale: true,
+        axisLabels: weekAxisLabels
+      });
       drawLineChart('quantity-history', 'quantity-history-legend', rawRows, [
         { key: 'total_quantity', label: 'Available quantity', color: colors.quantity }
-      ], integer, (row) => row.display_time);
+      ], integer, historyLabel, {
+        timeScale: true,
+        axisLabels: weekAxisLabels
+      });
       drawLineChart('hour-history', 'hour-history-legend', detail.time_of_day || [], [
         { key: 'typical_median_unit_price', label: 'Typical median price', color: colors.median }
       ], gold, (row) => row.label);
       drawLineChart('weekday-history', 'weekday-history-legend', detail.day_of_week || [], [
         { key: 'typical_median_unit_price', label: 'Typical median price', color: colors.median }
-      ], gold, (row) => row.label);
+      ], gold, (row) => String(row.label || '').slice(0, 3), { labelEveryPoint: true });
     }
 
     function drawLineChart(canvasId, legendId, rows, series, formatter, labelForRow, options = {}) {
@@ -527,7 +581,12 @@ ITEM_DETAIL_HTML = """<!doctype html>
         ? robustMaximum
         : rawMaximum;
       const spread = Math.max(maximum - minimum, 1);
-      const x = (index) => pad.left + (index / Math.max(rows.length - 1, 1)) * chartWidth;
+      const timeValues = rows.map((row) => Number(row.started_at_epoch));
+      const minimumTime = Math.min(...timeValues);
+      const timeSpread = Math.max(Math.max(...timeValues) - minimumTime, 1);
+      const x = (index) => options.timeScale
+        ? pad.left + ((timeValues[index] - minimumTime) / timeSpread) * chartWidth
+        : pad.left + (index / Math.max(rows.length - 1, 1)) * chartWidth;
       const y = (value) => {
         const bounded = Math.min(maximum, Math.max(minimum, Number(value)));
         return pad.top + chartHeight - ((bounded - minimum) / spread) * chartHeight;
@@ -567,13 +626,22 @@ ITEM_DETAIL_HTML = """<!doctype html>
         ctx.stroke();
       });
 
-      const labelIndexes = Array.from(new Set([0, Math.floor((rows.length - 1) / 2), rows.length - 1]));
       ctx.fillStyle = '#5e6b78';
-      labelIndexes.forEach((index, labelIndex) => {
-        const label = String(labelForRow(rows[index]) || '');
-        ctx.textAlign = labelIndex === 0 ? 'left' : labelIndex === labelIndexes.length - 1 ? 'right' : 'center';
-        ctx.fillText(label, x(index), height - 16);
-      });
+      if (options.axisLabels?.length) {
+        options.axisLabels.forEach((tick, labelIndex) => {
+          ctx.textAlign = labelIndex === 0 ? 'left' : labelIndex === options.axisLabels.length - 1 ? 'right' : 'center';
+          ctx.fillText(String(tick.label || ''), pad.left + (Number(tick.fraction) * chartWidth), height - 16);
+        });
+      } else {
+        const labelIndexes = options.labelEveryPoint
+          ? rows.map((_, index) => index)
+          : Array.from(new Set([0, Math.floor((rows.length - 1) / 2), rows.length - 1]));
+        labelIndexes.forEach((index, labelIndex) => {
+          const label = String(labelForRow(rows[index]) || '');
+          ctx.textAlign = labelIndex === 0 ? 'left' : labelIndex === labelIndexes.length - 1 ? 'right' : 'center';
+          ctx.fillText(label, x(index), height - 16);
+        });
+      }
       ctx.textAlign = 'left';
     }
 

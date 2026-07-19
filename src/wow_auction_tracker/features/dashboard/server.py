@@ -939,7 +939,9 @@ def _smooth_item_history(
 def _smoothed_price_histories(history: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     range_windows: tuple[tuple[str, int | None, int], ...] = (
         ("24", 24, 5),
-        ("168", 168, 49),
+        # Include enough source data for seven complete local calendar dates;
+        # the browser trims the extra boundary day in the selected timezone.
+        ("168", 192, 49),
         ("720", 720, 73),
         ("all", None, 97),
     )

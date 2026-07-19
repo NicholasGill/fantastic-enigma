@@ -6,6 +6,9 @@ from typing import Any, Iterable
 
 from wow_auction_tracker.config import Market
 
+_MAX_CONTIGUOUS_PRICE_RATIO = 2
+_MIN_CLUSTER_SAMPLE_SIZE = 3
+
 
 @dataclass(frozen=True)
 class AuctionListing:
@@ -103,20 +106,27 @@ def summarize_listings(listings: Iterable[AuctionListing]) -> list[ItemSummary]:
 
     summaries: list[ItemSummary] = []
     for (item_id, market), item_list in grouped.items():
-        prices = [
-            listing.effective_unit_price
+        priced_listings = [
+            listing
             for listing in item_list
             if listing.effective_unit_price is not None
         ]
-        first_quartile, third_quartile = _quartiles(prices)
+        raw_prices = [_listing_price(listing) for listing in priced_listings]
+        representative_prices = [
+            _listing_price(listing)
+            for listing in _representative_price_listings(priced_listings)
+        ]
+        first_quartile, third_quartile = _quartiles(representative_prices)
         summaries.append(
             ItemSummary(
                 item_id=item_id,
                 market=market,
                 listing_count=len(item_list),
                 total_quantity=sum(listing.quantity for listing in item_list),
-                min_unit_price=min(prices) if prices else None,
-                median_unit_price=int(median(prices)) if prices else None,
+                min_unit_price=min(raw_prices) if raw_prices else None,
+                median_unit_price=(
+                    int(median(representative_prices)) if representative_prices else None
+                ),
                 first_quartile_unit_price=first_quartile,
                 third_quartile_unit_price=third_quartile,
             )
@@ -137,14 +147,17 @@ def calculate_item_history_metrics(listings: Iterable[AuctionListing]) -> list[I
             for listing in item_list
             if listing.effective_unit_price is not None
         ]
-        prices = [listing.effective_unit_price for listing in priced_listings]
-        min_price = min(prices) if prices else None
-        first_quartile, third_quartile = _quartiles(prices)
-        priced_quantity = sum(listing.quantity for listing in priced_listings)
+        raw_prices = [_listing_price(listing) for listing in priced_listings]
+        representative_listings = _representative_price_listings(priced_listings)
+        representative_prices = [
+            _listing_price(listing) for listing in representative_listings
+        ]
+        min_price = min(raw_prices) if raw_prices else None
+        first_quartile, third_quartile = _quartiles(representative_prices)
+        priced_quantity = sum(listing.quantity for listing in representative_listings)
         weighted_total = sum(
-            listing.effective_unit_price * listing.quantity
-            for listing in priced_listings
-            if listing.effective_unit_price is not None
+            _listing_price(listing) * listing.quantity
+            for listing in representative_listings
         )
         metrics.append(
             ItemHistoryMetric(
@@ -153,7 +166,9 @@ def calculate_item_history_metrics(listings: Iterable[AuctionListing]) -> list[I
                 listing_count=len(item_list),
                 total_quantity=sum(listing.quantity for listing in item_list),
                 min_unit_price=min_price,
-                median_unit_price=int(median(prices)) if prices else None,
+                median_unit_price=(
+                    int(median(representative_prices)) if representative_prices else None
+                ),
                 first_quartile_unit_price=first_quartile,
                 third_quartile_unit_price=third_quartile,
                 weighted_average_unit_price=weighted_total // priced_quantity if priced_quantity else None,
@@ -166,6 +181,52 @@ def calculate_item_history_metrics(listings: Iterable[AuctionListing]) -> list[I
         )
 
     return sorted(metrics, key=lambda item: (item.market.value, item.item_id))
+
+
+def _representative_price_listings(
+    priced_listings: list[AuctionListing],
+) -> list[AuctionListing]:
+    """Return the densest contiguous listing-price band.
+
+    Large multiplicative gaps split listings into price bands. The band with
+    the most listing records is treated as the active market; ties prefer the
+    lower-priced band to keep pricing conservative. Sparse samples are left
+    unchanged because there is not enough evidence to classify an outlier.
+    """
+    ordered = sorted(priced_listings, key=_listing_price)
+    if len(ordered) < _MIN_CLUSTER_SAMPLE_SIZE:
+        return ordered
+
+    clusters: list[list[AuctionListing]] = [[]]
+    previous_price: int | None = None
+    for listing in ordered:
+        price = _listing_price(listing)
+        if previous_price is not None and (
+            (previous_price <= 0 < price)
+            or price > previous_price * _MAX_CONTIGUOUS_PRICE_RATIO
+        ):
+            clusters.append([])
+        clusters[-1].append(listing)
+        previous_price = price
+
+    largest_cluster_size = max(len(cluster) for cluster in clusters)
+    if largest_cluster_size < 2:
+        return ordered
+
+    largest_clusters = [
+        cluster for cluster in clusters if len(cluster) == largest_cluster_size
+    ]
+    return min(
+        largest_clusters,
+        key=lambda cluster: median(_listing_price(listing) for listing in cluster),
+    )
+
+
+def _listing_price(listing: AuctionListing) -> int:
+    price = listing.effective_unit_price
+    if price is None:
+        raise ValueError("a representative price listing must have a price")
+    return price
 
 
 def _quartiles(values: list[int | None]) -> tuple[int | None, int | None]:
