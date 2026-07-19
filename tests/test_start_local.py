@@ -11,10 +11,17 @@ def _run_with_fake_uv(tmp_path: Path, *arguments: str) -> str:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     invocation_log = tmp_path / "uv-invocations.log"
+    schedule_ready = tmp_path / "schedule-ready"
     fake_uv = fake_bin / "uv"
     fake_uv.write_text(
         "#!/usr/bin/env bash\n"
-        'printf "%s\\n" "$*" >> "$WAT_TEST_LOG"\n'
+        'if [[ " $* " == *" schedule "* ]]; then\n'
+        '  printf "%s\\n" "$*" >> "$WAT_TEST_LOG"\n'
+        '  : > "$WAT_TEST_SCHEDULE_READY"\n'
+        "else\n"
+        '  until [[ -e "$WAT_TEST_SCHEDULE_READY" ]]; do sleep 0.01; done\n'
+        '  printf "%s\\n" "$*" >> "$WAT_TEST_LOG"\n'
+        "fi\n"
     )
     fake_uv.chmod(0o755)
 
@@ -22,6 +29,7 @@ def _run_with_fake_uv(tmp_path: Path, *arguments: str) -> str:
     environment.pop("WAT_INTERVAL_MINUTES", None)
     environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
     environment["WAT_TEST_LOG"] = str(invocation_log)
+    environment["WAT_TEST_SCHEDULE_READY"] = str(schedule_ready)
 
     subprocess.run(
         ["bash", str(START_SCRIPT), *arguments],
@@ -30,6 +38,7 @@ def _run_with_fake_uv(tmp_path: Path, *arguments: str) -> str:
         check=True,
         capture_output=True,
         text=True,
+        timeout=5,
     )
     return invocation_log.read_text()
 
