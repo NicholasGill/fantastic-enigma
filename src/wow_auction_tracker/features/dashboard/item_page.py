@@ -276,7 +276,7 @@ ITEM_DETAIL_HTML = """<!doctype html>
       </section>
 
       <section>
-        <div class="section-head"><div><h2>Price by Hour of Day</h2><div class="section-note">Average prices in the selected timezone</div></div></div>
+        <div class="section-head"><div><h2>Price by Hour of Day</h2><div class="section-note">Typical snapshot prices in the selected timezone</div></div></div>
         <div class="chart-body">
           <canvas id="hour-history" width="760" height="320"></canvas>
           <div class="legend" id="hour-history-legend"></div>
@@ -284,7 +284,7 @@ ITEM_DETAIL_HTML = """<!doctype html>
       </section>
 
       <section class="chart-wide">
-        <div class="section-head"><div><h2>Price by Day of Week</h2><div class="section-note">Average historical prices for Monday through Sunday</div></div></div>
+        <div class="section-head"><div><h2>Price by Day of Week</h2><div class="section-note">Typical snapshot prices for Monday through Sunday</div></div></div>
         <div class="chart-body">
           <canvas id="weekday-history" width="1200" height="320"></canvas>
           <div class="legend" id="weekday-history-legend"></div>
@@ -493,14 +493,14 @@ ITEM_DETAIL_HTML = """<!doctype html>
         { key: 'total_quantity', label: 'Available quantity', color: colors.quantity }
       ], integer, (row) => row.display_time);
       drawLineChart('hour-history', 'hour-history-legend', detail.time_of_day || [], [
-        { key: 'average_first_quartile_unit_price', label: 'Average Q1', color: colors.q1 },
-        { key: 'average_median_unit_price', label: 'Average median', color: colors.median },
-        { key: 'average_third_quartile_unit_price', label: 'Average Q3', color: colors.q3 }
+        { key: 'typical_first_quartile_unit_price', label: 'Typical Q1', color: colors.q1 },
+        { key: 'typical_median_unit_price', label: 'Typical median', color: colors.median },
+        { key: 'typical_third_quartile_unit_price', label: 'Typical Q3', color: colors.q3 }
       ], gold, (row) => row.label);
       drawLineChart('weekday-history', 'weekday-history-legend', detail.day_of_week || [], [
-        { key: 'average_first_quartile_unit_price', label: 'Average Q1', color: colors.q1 },
-        { key: 'average_median_unit_price', label: 'Average median', color: colors.median },
-        { key: 'average_third_quartile_unit_price', label: 'Average Q3', color: colors.q3 }
+        { key: 'typical_first_quartile_unit_price', label: 'Typical Q1', color: colors.q1 },
+        { key: 'typical_median_unit_price', label: 'Typical median', color: colors.median },
+        { key: 'typical_third_quartile_unit_price', label: 'Typical Q3', color: colors.q3 }
       ], gold, (row) => row.label);
     }
 

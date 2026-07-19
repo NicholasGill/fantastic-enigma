@@ -20,7 +20,7 @@ stay focused on future work.
     outlier-resistant scale while retaining a raw-data chart mode and the
     original snapshot values.
   - Aggregate first-quartile, median, and third-quartile prices by local hour
-    and weekday.
+    and weekday, using median bucket values for outlier-resistant charts.
   - Include sell-through estimates, current recommendation explanations,
     anomaly events, and imported player outcome history.
 

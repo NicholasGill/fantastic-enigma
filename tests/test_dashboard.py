@@ -16,6 +16,7 @@ from wow_auction_tracker.features.dashboard.server import (
     _crafting_quality_from_raw_json,
     _dashboard_timezone,
     _has_buy_opportunity,
+    _item_history_bucket,
     _smooth_item_history,
     _smoothed_price_histories,
     create_dashboard_app,
@@ -292,6 +293,24 @@ def test_item_history_uses_stronger_smoothing_for_longer_ranges() -> None:
     assert history[35]["third_quartile_unit_price"] == 1_000_000
 
 
+def test_item_time_bucket_keeps_averages_and_adds_outlier_resistant_typical_prices() -> None:
+    rows = [
+        {
+            "first_quartile_unit_price": q1,
+            "median_unit_price": middle,
+            "third_quartile_unit_price": q3,
+        }
+        for q1, middle, q3 in ((100, 110, 120), (105, 115, 125), (10_000, 20_000, 30_000))
+    ]
+
+    bucket = _item_history_bucket(9, "9 AM", rows)
+
+    assert bucket["average_third_quartile_unit_price"] == 10082
+    assert bucket["typical_first_quartile_unit_price"] == 105
+    assert bucket["typical_median_unit_price"] == 115
+    assert bucket["typical_third_quartile_unit_price"] == 125
+
+
 def test_dashboard_serves_item_page_api_empty_state_and_not_found(tmp_path: Path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")
@@ -318,6 +337,8 @@ def test_dashboard_serves_item_page_api_empty_state_and_not_found(tmp_path: Path
     assert page_response.status_code == 200
     assert b"Price by Hour of Day" in page_response.data
     assert b"Price by Day of Week" in page_response.data
+    assert b"Typical snapshot prices in the selected timezone" in page_response.data
+    assert b"typical_third_quartile_unit_price" in page_response.data
     assert b"Adaptive rolling median; raw values remain available" in page_response.data
     assert b'data-mode="raw"' in page_response.data
     assert b"robustUpper" in page_response.data
@@ -326,6 +347,7 @@ def test_dashboard_serves_item_page_api_empty_state_and_not_found(tmp_path: Path
     assert api_response.get_json()["summary"]["snapshot_count"] == 0
     assert api_response.get_json()["smoothed_price_history"]["168"] == []
     assert api_response.get_json()["time_of_day"][0]["snapshot_count"] == 0
+    assert api_response.get_json()["time_of_day"][0]["typical_median_unit_price"] is None
     assert missing_page_response.status_code == 404
     assert missing_api_response.status_code == 404
 

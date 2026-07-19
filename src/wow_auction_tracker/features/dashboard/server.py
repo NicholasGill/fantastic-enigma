@@ -1057,6 +1057,9 @@ def _item_history_bucket(key: int, label: str, rows: list[dict[str, Any]]) -> di
         "average_first_quartile_unit_price": _average_item_value(rows, "first_quartile_unit_price"),
         "average_median_unit_price": _average_item_value(rows, "median_unit_price"),
         "average_third_quartile_unit_price": _average_item_value(rows, "third_quartile_unit_price"),
+        "typical_first_quartile_unit_price": _median_item_value(rows, "first_quartile_unit_price"),
+        "typical_median_unit_price": _median_item_value(rows, "median_unit_price"),
+        "typical_third_quartile_unit_price": _median_item_value(rows, "third_quartile_unit_price"),
         "average_total_quantity": _average_item_value(rows, "total_quantity"),
         "average_listing_count": _average_item_value(rows, "listing_count"),
         "average_sell_through_ratio_bps": _average_item_value(rows, "sell_through_ratio_bps"),
@@ -1068,6 +1071,11 @@ def _average_item_value(rows: list[dict[str, Any]], key: str) -> int | None:
     if not values:
         return None
     return round(sum(values) / len(values))
+
+
+def _median_item_value(rows: list[dict[str, Any]], key: str) -> int | None:
+    values = [int(row[key]) for row in rows if row.get(key) is not None]
+    return round(median(values)) if values else None
 
 
 def _minimum_item_value(rows: list[dict[str, Any]], key: str) -> int | None:

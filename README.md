@@ -103,7 +103,8 @@ sell-through estimates, recommendation reasons, anomalies, and imported player
 outcomes. Price history uses range-aware rolling medians and an outlier-resistant
 vertical scale by default. Longer views use stronger smoothing so brief listing
 spikes do not flatten the chart; use **Raw** to inspect every recorded quartile
-value.
+value. Hour-of-day and weekday charts use the median snapshot price in each
+bucket so temporary extremes do not distort the typical time pattern.
 
 Stored price summaries include minimum, first quartile, median, and third
 quartile unit prices. The dashboard emphasizes minimum, buy, sell, deposit, and
