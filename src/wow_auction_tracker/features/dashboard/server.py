@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, jsonify, request
 from sqlalchemy.engine import make_url
 
+from wow_auction_tracker.features.dashboard.item_page import ITEM_DETAIL_HTML
 from wow_auction_tracker.features.player import import_saved_variables, parse_auction_mail_subject
 from wow_auction_tracker.features.recommendations import RecommendationEngine, recommendation_to_dict
 from wow_auction_tracker.storage import AuctionRepository, create_db_engine
@@ -201,6 +203,129 @@ class DashboardDataStore:
         return {
             "item": dict(item) if item else {"item_id": item_id, "name": None, "market": None},
             "history": [dict(row) for row in rows],
+        }
+
+    def item_exists(self, item_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "select 1 from tracked_items where item_id = ? limit 1",
+                (item_id,),
+            ).fetchone()
+        return row is not None
+
+    def item_detail(
+        self,
+        item_id: int,
+        *,
+        display_timezone: str = DEFAULT_DISPLAY_TIMEZONE,
+    ) -> dict[str, Any] | None:
+        timezone_name = _dashboard_timezone(display_timezone)
+        with self._connect() as connection:
+            item = connection.execute(
+                """
+                select
+                    t.item_id,
+                    coalesce(m.name, t.name, 'Item ' || t.item_id) as name,
+                    t.market,
+                    m.quality,
+                    m.item_class,
+                    m.item_subclass,
+                    m.item_level,
+                    m.is_stackable,
+                    m.sell_price as vendor_sell_price,
+                    m.icon_url
+                from tracked_items t
+                left join item_metadata m on m.item_id = t.item_id
+                where t.item_id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+            if item is None:
+                return None
+
+            rows = connection.execute(
+                """
+                select
+                    r.id as fetch_run_id,
+                    r.started_at,
+                    s.listing_count,
+                    s.total_quantity,
+                    s.min_unit_price,
+                    s.first_quartile_unit_price,
+                    s.median_unit_price,
+                    s.third_quartile_unit_price,
+                    h.weighted_average_unit_price,
+                    h.lowest_price_quantity,
+                    h.price_change_1h_bps,
+                    h.price_change_24h_bps,
+                    h.price_change_7d_bps,
+                    h.historical_volatility_bps,
+                    h.percentile_rank_bps,
+                    h.market_depth_score,
+                    h.liquidity_score,
+                    st.disappeared_listing_count,
+                    st.disappeared_quantity,
+                    st.probable_sold_quantity,
+                    st.probable_sold_average_unit_price,
+                    st.sell_through_ratio_bps,
+                    st.confidence as sell_through_confidence
+                from item_summaries s
+                join fetch_runs r on r.id = s.fetch_run_id
+                left join item_history_metrics h
+                    on h.fetch_run_id = s.fetch_run_id
+                    and h.item_id = s.item_id
+                    and h.market = s.market
+                left join sell_through_metrics st
+                    on st.fetch_run_id = s.fetch_run_id
+                    and st.item_id = s.item_id
+                    and st.market = s.market
+                where s.item_id = ? and r.status = 'success'
+                order by r.started_at, r.id
+                """,
+                (item_id,),
+            ).fetchall()
+            anomalies = connection.execute(
+                """
+                select detected_at, anomaly_type, severity, baseline_value, observed_value, explanation
+                from item_anomalies
+                where item_id = ?
+                order by detected_at desc, id desc
+                limit 12
+                """,
+                (item_id,),
+            ).fetchall()
+            player_outcomes = connection.execute(
+                """
+                select
+                    o.observed_at,
+                    o.outcome,
+                    o.item_count,
+                    o.money,
+                    o.character,
+                    o.realm,
+                    pm.confidence as match_confidence,
+                    pm.elapsed_seconds
+                from player_auction_outcomes o
+                left join player_auction_matches pm on pm.outcome_id = o.id
+                where coalesce(o.item_id, pm.item_id) = ?
+                order by o.observed_at desc, o.id desc
+                limit 20
+                """,
+                (item_id,),
+            ).fetchall()
+
+        history = [_item_detail_history_row(dict(row), timezone_name) for row in rows]
+        recommendation = _item_recommendation(self.database_url, item_id, timezone_name)
+        return {
+            "item": dict(item),
+            "summary": _item_detail_summary(history),
+            "history": history,
+            "time_of_day": _item_history_by_hour(history),
+            "day_of_week": _item_history_by_weekday(history),
+            "recommendation": recommendation,
+            "anomalies": [dict(row) for row in anomalies],
+            "player_outcomes": [dict(row) for row in player_outcomes],
+            "display_timezone": timezone_name,
         }
 
     def import_addon_data(self, saved_variables_path: Path | None = None) -> dict[str, Any]:
@@ -684,6 +809,20 @@ def create_dashboard_app(config: DashboardConfig) -> Flask:
             return jsonify({"error": "item_id must be an integer"}), 400
         return jsonify(store.item_history(item_id))
 
+    @app.get("/items/<int:item_id>")
+    def _item_page(item_id: int) -> Response:
+        if not store.item_exists(item_id):
+            return Response("Item not found", status=404, mimetype="text/plain")
+        return Response(ITEM_DETAIL_HTML, mimetype="text/html")
+
+    @app.get("/api/items/<int:item_id>")
+    def _item_detail(item_id: int) -> Response | tuple[Response, int]:
+        display_timezone = _dashboard_timezone(request.args.get("timezone", DEFAULT_DISPLAY_TIMEZONE))
+        detail = store.item_detail(item_id, display_timezone=display_timezone)
+        if detail is None:
+            return jsonify({"error": "item not found"}), 404
+        return jsonify(detail)
+
     @app.post("/api/import-addon")
     def _import_addon() -> Response | tuple[Response, int]:
         try:
@@ -728,6 +867,132 @@ def _sqlite_database_path(database_url: str) -> str:
 
 def _dashboard_timezone(value: str) -> str:
     return value if value in DASHBOARD_TIMEZONES else DEFAULT_DISPLAY_TIMEZONE
+
+
+def _item_recommendation(database_url: str, item_id: int, display_timezone: str) -> dict[str, Any] | None:
+    try:
+        recommendations = RecommendationEngine(
+            database_url,
+            display_timezone=display_timezone,
+        ).recommend(item_id=item_id)
+    except ValueError:
+        return None
+    for recommendation in recommendations:
+        if recommendation.item_id == item_id:
+            return recommendation_to_dict(recommendation)
+    return None
+
+
+def _item_detail_history_row(row: dict[str, Any], display_timezone: str) -> dict[str, Any]:
+    started_at = _parse_dashboard_datetime(row["started_at"])
+    local_started_at = started_at.astimezone(ZoneInfo(display_timezone))
+    row["started_at_epoch"] = round(started_at.timestamp())
+    row["display_time"] = local_started_at.strftime("%b %d, %Y %I:%M %p %Z").replace(" 0", " ")
+    row["local_hour"] = local_started_at.hour
+    row["local_weekday"] = local_started_at.weekday()
+    return row
+
+
+def _parse_dashboard_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _item_detail_summary(history: list[dict[str, Any]]) -> dict[str, Any]:
+    if not history:
+        return {
+            "snapshot_count": 0,
+            "latest": None,
+            "first_seen": None,
+            "last_seen": None,
+            "all_time_low_unit_price": None,
+            "average_first_quartile_unit_price": None,
+            "average_median_unit_price": None,
+            "seven_day_low_unit_price": None,
+            "seven_day_average_first_quartile_unit_price": None,
+            "seven_day_average_median_unit_price": None,
+        }
+
+    latest = history[-1]
+    seven_day_cutoff = int(latest["started_at_epoch"]) - (7 * 24 * 60 * 60)
+    recent = [row for row in history if int(row["started_at_epoch"]) >= seven_day_cutoff]
+    return {
+        "snapshot_count": len(history),
+        "latest": latest,
+        "first_seen": history[0]["started_at"],
+        "last_seen": latest["started_at"],
+        "all_time_low_unit_price": _minimum_item_value(history, "min_unit_price"),
+        "average_first_quartile_unit_price": _average_item_value(history, "first_quartile_unit_price"),
+        "average_median_unit_price": _average_item_value(history, "median_unit_price"),
+        "seven_day_low_unit_price": _minimum_item_value(recent, "min_unit_price"),
+        "seven_day_average_first_quartile_unit_price": _average_item_value(
+            recent,
+            "first_quartile_unit_price",
+        ),
+        "seven_day_average_median_unit_price": _average_item_value(recent, "median_unit_price"),
+    }
+
+
+def _item_history_by_hour(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        _item_history_bucket(
+            hour,
+            _hour_label(hour),
+            [row for row in history if int(row["local_hour"]) == hour],
+        )
+        for hour in range(24)
+    ]
+
+
+def _item_history_by_weekday(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    weekday_labels = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+    return [
+        _item_history_bucket(
+            weekday,
+            label,
+            [row for row in history if int(row["local_weekday"]) == weekday],
+        )
+        for weekday, label in enumerate(weekday_labels)
+    ]
+
+
+def _item_history_bucket(key: int, label: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "snapshot_count": len(rows),
+        "low_unit_price": _minimum_item_value(rows, "min_unit_price"),
+        "average_first_quartile_unit_price": _average_item_value(rows, "first_quartile_unit_price"),
+        "average_median_unit_price": _average_item_value(rows, "median_unit_price"),
+        "average_third_quartile_unit_price": _average_item_value(rows, "third_quartile_unit_price"),
+        "average_total_quantity": _average_item_value(rows, "total_quantity"),
+        "average_listing_count": _average_item_value(rows, "listing_count"),
+        "average_sell_through_ratio_bps": _average_item_value(rows, "sell_through_ratio_bps"),
+    }
+
+
+def _average_item_value(rows: list[dict[str, Any]], key: str) -> int | None:
+    values = [int(row[key]) for row in rows if row.get(key) is not None]
+    if not values:
+        return None
+    return round(sum(values) / len(values))
+
+
+def _minimum_item_value(rows: list[dict[str, Any]], key: str) -> int | None:
+    values = [int(row[key]) for row in rows if row.get(key) is not None]
+    return min(values) if values else None
+
+
+def _hour_label(hour: int) -> str:
+    suffix = "AM" if hour < 12 else "PM"
+    display_hour = hour % 12 or 12
+    return f"{display_hour} {suffix}"
 
 
 def _enriched_player_outcomes(
@@ -1493,6 +1758,12 @@ DASHBOARD_HTML = """<!doctype html>
       color: var(--muted);
       font-size: 11px;
     }
+    .item-link {
+      color: inherit;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .item-link:hover { color: var(--accent); text-decoration: underline; }
     .quality-badge {
       display: inline-flex;
       align-items: center;
@@ -2261,7 +2532,7 @@ DASHBOARD_HTML = """<!doctype html>
         const subtitle = [item.item_class, item.item_subclass].filter(Boolean).join(' / ');
         const devMarker = item.dev_buy_opportunity ? '<span class="dev-marker">Dev</span>' : '';
         return `<tr${classAttribute} data-item-id="${item.item_id}">
-          <td><span class="item-cell">${icon}<span class="item-meta"><span>${item.name}${devMarker}</span><small>${subtitle}</small></span></span></td>
+          <td><span class="item-cell">${icon}<span class="item-meta"><span><a class="item-link" href="/items/${item.item_id}">${item.name}</a>${devMarker}</span><small>${subtitle}</small></span></span></td>
           <td><span class="quality-badge ${qualityClass(item.crafting_quality)}">${qualityLabel(item.crafting_quality)}</span></td>
           <td>${item.item_id}</td>
           <td>${gold(item.min_unit_price)}</td>
@@ -2277,7 +2548,7 @@ DASHBOARD_HTML = """<!doctype html>
         </tr>`;
       }).join('');
       els.items.querySelectorAll('tr').forEach((row) => {
-        row.addEventListener('click', () => selectItem(Number(row.dataset.itemId)));
+        row.addEventListener('click', () => openItem(Number(row.dataset.itemId)));
       });
     }
 
@@ -2338,7 +2609,7 @@ DASHBOARD_HTML = """<!doctype html>
         return `<div class="recommendation${selected}" data-item-id="${item.item_id}">
           <div class="recommendation-head">
             <span class="pill">${item.action}</span>
-            <strong title="${item.name}">${item.name}</strong>
+            <strong title="${item.name}"><a class="item-link" href="/items/${item.item_id}">${item.name}</a></strong>
             <span class="score">${item.score}</span>
           </div>
           <div class="reasons">${gold(item.recommended_buy_price)} buy, ${gold(item.recommended_sell_price)} sell (${sellSourceLabel(item.recommended_sell_price_source) || 'unknown'}), ${gold(item.auction_deposit_unit_price)} deposit, ${gold(item.estimated_profit_unit_price)} net, ${item.price_trend_score} trend, ${item.confidence}% confidence</div>
@@ -2347,7 +2618,7 @@ DASHBOARD_HTML = """<!doctype html>
         </div>`;
       }).join('');
       els.recommendations.querySelectorAll('.recommendation').forEach((row) => {
-        row.addEventListener('click', () => selectItem(Number(row.dataset.itemId)));
+        row.addEventListener('click', () => openItem(Number(row.dataset.itemId)));
       });
     }
 
@@ -2359,7 +2630,7 @@ DASHBOARD_HTML = """<!doctype html>
         const gain = profit(item.estimated_profit_unit_price);
         const priceTrend = trend(item.price_trend_score);
         return `<tr data-item-id="${item.item_id}">
-          <td>${itemName(item.name)}<br><span class="muted">#${item.item_id}</span></td>
+          <td><a class="item-link" href="/items/${item.item_id}">${itemName(item.name)}</a><br><span class="muted">#${item.item_id}</span></td>
           <td><span class="score">${integer(item.buy_score)}</span></td>
           <td>${gold(item.latest_shifted_unit_price || item.latest_min_unit_price)}</td>
           <td>${gold(item.recommended_buy_price)}</td>
@@ -2370,7 +2641,7 @@ DASHBOARD_HTML = """<!doctype html>
         </tr>`;
       }).join('') : '<tr><td colspan="8" class="muted">No current buy opportunities.</td></tr>';
       els.buyRecommendationsTable.querySelectorAll('tr[data-item-id]').forEach((row) => {
-        row.addEventListener('click', () => selectItem(Number(row.dataset.itemId)));
+        row.addEventListener('click', () => openItem(Number(row.dataset.itemId)));
       });
 
       const sellRows = (overview.sell_recommendations || []).filter((item) => {
@@ -2379,7 +2650,7 @@ DASHBOARD_HTML = """<!doctype html>
       els.sellRecommendationsTable.innerHTML = sellRows.length ? sellRows.map((item) => {
         const gain = profit(item.sell_profit_unit_price);
         return `<tr data-item-id="${item.item_id}">
-          <td>${itemName(item.name)}<br><span class="muted">#${item.item_id}</span></td>
+          <td><a class="item-link" href="/items/${item.item_id}">${itemName(item.name)}</a><br><span class="muted">#${item.item_id}</span></td>
           <td><span class="score">${integer(item.sell_score)}</span></td>
           <td>${gold(item.latest_min_unit_price)}</td>
           <td>${gold(item.recommended_sell_price)}${sellSourceBadge(item.recommended_sell_price_source)}</td>
@@ -2390,7 +2661,7 @@ DASHBOARD_HTML = """<!doctype html>
         </tr>`;
       }).join('') : '<tr><td colspan="8" class="muted">No current sell opportunities.</td></tr>';
       els.sellRecommendationsTable.querySelectorAll('tr[data-item-id]').forEach((row) => {
-        row.addEventListener('click', () => selectItem(Number(row.dataset.itemId)));
+        row.addEventListener('click', () => openItem(Number(row.dataset.itemId)));
       });
     }
 
@@ -2545,6 +2816,10 @@ DASHBOARD_HTML = """<!doctype html>
       renderItems();
       renderRecommendations();
       await loadItemHistory(itemId);
+    }
+
+    function openItem(itemId) {
+      window.location.assign(`/items/${itemId}`);
     }
 
     async function loadItemHistory(itemId) {

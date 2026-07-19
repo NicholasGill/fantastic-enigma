@@ -134,19 +134,26 @@ class RecommendationEngine:
         self.min_snapshots = min_snapshots
         self.display_timezone = _display_timezone(display_timezone)
 
-    def recommend(self, *, limit: int | None = None) -> list[Recommendation]:
-        inputs = self._load_inputs()
+    def recommend(
+        self,
+        *,
+        limit: int | None = None,
+        item_id: int | None = None,
+    ) -> list[Recommendation]:
+        inputs = self._load_inputs(item_id=item_id)
         recommendations = [self._score(item) for item in inputs]
         recommendations.sort(key=lambda item: (item.score, item.confidence, item.estimated_demand_score), reverse=True)
         if limit is not None:
             return recommendations[:limit]
         return recommendations
 
-    def _load_inputs(self) -> list[RecommendationInputs]:
+    def _load_inputs(self, *, item_id: int | None = None) -> list[RecommendationInputs]:
         with sqlite3.connect(self.database_path) as connection:
             connection.row_factory = sqlite3.Row
+            where_clause = "where t.item_id = ?" if item_id is not None else ""
+            parameters: tuple[int, ...] = (item_id,) if item_id is not None else ()
             item_rows = connection.execute(
-                """
+                f"""
                 select
                     t.item_id,
                     coalesce(m.name, t.name, 'Item ' || t.item_id) as name,
@@ -154,8 +161,10 @@ class RecommendationEngine:
                     m.sell_price
                 from tracked_items t
                 left join item_metadata m on m.item_id = t.item_id
+                {where_clause}
                 order by t.item_id
-                """
+                """,
+                parameters,
             ).fetchall()
             return [self._load_item_inputs(connection, row) for row in item_rows]
 

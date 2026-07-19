@@ -192,6 +192,96 @@ def test_dashboard_item_history_returns_rows_in_fetch_order(tmp_path: Path) -> N
     assert payload["history"][0]["first_quartile_unit_price"] == 20000
 
 
+def test_dashboard_item_detail_groups_history_by_local_hour_and_weekday(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+    run_ids: list[int] = []
+    for index, price in enumerate((10000, 20000, 30000), start=1):
+        run_id = repository.start_fetch_run(config)
+        listing = AuctionListing(
+            auction_id=index,
+            item_id=210930,
+            market=Market.COMMODITY,
+            quantity=index * 10,
+            unit_price=price,
+            buyout=None,
+            bid=None,
+            time_left="LONG",
+            raw={"id": index, "item": {"id": 210930}},
+        )
+        repository.complete_fetch_run(run_id, [listing], summarize_listings([listing]))
+        run_ids.append(run_id)
+
+    timestamps = (
+        "2026-07-06 13:00:00",
+        "2026-07-06 14:00:00",
+        "2026-07-07 13:00:00",
+    )
+    with engine.begin() as connection:
+        for run_id, timestamp in zip(run_ids, timestamps, strict=True):
+            connection.exec_driver_sql(
+                "update fetch_runs set started_at = ?, finished_at = ? where id = ?",
+                (timestamp, timestamp, run_id),
+            )
+
+    payload = DashboardDataStore(f"sqlite:///{db_path}").item_detail(
+        210930,
+        display_timezone="America/New_York",
+    )
+
+    assert payload is not None
+    assert payload["summary"]["snapshot_count"] == 3
+    assert payload["summary"]["latest"]["first_quartile_unit_price"] == 30000
+    assert payload["summary"]["seven_day_average_first_quartile_unit_price"] == 20000
+    assert payload["history"][0]["display_time"] == "Jul 6, 2026 9:00 AM EDT"
+    assert payload["time_of_day"][9]["snapshot_count"] == 2
+    assert payload["time_of_day"][9]["average_first_quartile_unit_price"] == 20000
+    assert payload["time_of_day"][10]["snapshot_count"] == 1
+    assert payload["day_of_week"][0]["label"] == "Monday"
+    assert payload["day_of_week"][0]["snapshot_count"] == 2
+    assert payload["day_of_week"][0]["average_median_unit_price"] == 15000
+    assert payload["day_of_week"][1]["average_median_unit_price"] == 30000
+
+
+def test_dashboard_serves_item_page_api_empty_state_and_not_found(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {"items": [{"id": 210930, "name": "Bismuth", "market": "commodity"}]}
+    )
+    repository.start_fetch_run(config)
+    app = create_dashboard_app(
+        DashboardConfig(
+            database_url=f"sqlite:///{db_path}",
+            host="127.0.0.1",
+            port=8000,
+        )
+    )
+
+    client = app.test_client()
+    page_response = client.get("/items/210930")
+    api_response = client.get("/api/items/210930?timezone=America/New_York")
+    missing_page_response = client.get("/items/999999")
+    missing_api_response = client.get("/api/items/999999")
+
+    assert page_response.status_code == 200
+    assert b"Price by Hour of Day" in page_response.data
+    assert b"Price by Day of Week" in page_response.data
+    assert api_response.status_code == 200
+    assert api_response.get_json()["item"]["name"] == "Bismuth"
+    assert api_response.get_json()["summary"]["snapshot_count"] == 0
+    assert api_response.get_json()["time_of_day"][0]["snapshot_count"] == 0
+    assert missing_page_response.status_code == 404
+    assert missing_api_response.status_code == 404
+
+
 def test_dashboard_flask_app_serves_html_and_json(tmp_path: Path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")
@@ -954,6 +1044,8 @@ def test_dashboard_table_headers_have_tooltips() -> None:
     assert "sellSourceBadge" in DASHBOARD_HTML
     assert "drawLine(ctx, points, x, y, 'min_unit_price'" in DASHBOARD_HTML
     assert "drawLine(ctx, points, x, y, 'median_unit_price'" not in DASHBOARD_HTML
+    assert "openItem" in DASHBOARD_HTML
+    assert "/items/${item.item_id}" in DASHBOARD_HTML
 
 
 def test_dashboard_flags_buy_opportunities() -> None:

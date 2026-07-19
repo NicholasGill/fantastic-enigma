@@ -49,10 +49,7 @@ Completed features are tracked in `completed.md`.
   - Filter by item group, market, action, and minimum confidence.
   - Preserve selected filters in the URL query string.
 
-- [ ] Add richer item detail pages.
-  - Show price history, quantity history, sell-through history, and player
-    outcome history for one item.
-  - Include current recommendation explanation and recent anomaly events.
+- [ ] Finish item detail page exports.
   - Add CSV export links for the selected item.
 
 - [ ] Add buy opportunities dashboard.

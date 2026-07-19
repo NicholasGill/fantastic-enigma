@@ -96,6 +96,12 @@ Open `http://127.0.0.1:8000` to inspect database size, snapshot counts, latest
 item summaries, recommendations, recent runs, and per-item price history. Use
 `--port` if port 8000 is already in use.
 
+Click an item in the market, buy, or sell views to open its detail page. Item
+pages show current quartile pricing, price and inventory history, 24-hour,
+7-day, 30-day, and all-history ranges, average prices by hour and weekday,
+sell-through estimates, recommendation reasons, anomalies, and imported player
+outcomes.
+
 Stored price summaries include minimum, first quartile, median, and third
 quartile unit prices. The dashboard emphasizes minimum, buy, sell, deposit, and
 net profit per unit so the active view stays focused on flip decisions.

@@ -10,6 +10,17 @@ stay focused on future work.
     locked `uv` development environment.
   - Build package artifacts after successful main-branch checks.
 
+## Dashboard Features
+
+- [x] Add richer item detail pages.
+  - Link dashboard market, buy, sell, and recommendation rows to one item page.
+  - Show current quartile prices, price and quantity history, and selectable
+    24-hour, 7-day, 30-day, and all-history ranges.
+  - Aggregate first-quartile, median, and third-quartile prices by local hour
+    and weekday.
+  - Include sell-through estimates, current recommendation explanations,
+    anomaly events, and imported player outcome history.
+
 ## Snapshot Inference Features
 
 - [x] Store item metadata from Blizzard item and media endpoints.

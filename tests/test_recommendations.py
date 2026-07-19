@@ -55,6 +55,46 @@ def test_recommendations_score_discounted_item_with_quantity_drop(tmp_path: Path
     assert any("below recent median" in reason for reason in recommendations[0].reasons)
 
 
+def test_recommendations_can_limit_scoring_to_one_item(tmp_path: Path) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {
+            "items": [
+                {"id": 210930, "name": "Bismuth", "market": "commodity"},
+                {"id": 210933, "name": "Aqirite", "market": "commodity"},
+            ]
+        }
+    )
+    run_id = repository.start_fetch_run(config)
+    listings = [
+        AuctionListing(
+            auction_id=item_id,
+            item_id=item_id,
+            market=Market.COMMODITY,
+            quantity=10,
+            unit_price=10000,
+            buyout=None,
+            bid=None,
+            time_left="LONG",
+            raw={"id": item_id, "item": {"id": item_id}},
+        )
+        for item_id in (210930, 210933)
+    ]
+    repository.complete_fetch_run(
+        run_id,
+        listings,
+        summarize_listings(listings),
+        calculate_item_history_metrics(listings),
+    )
+
+    recommendations = RecommendationEngine(f"sqlite:///{db_path}").recommend(item_id=210933)
+
+    assert [recommendation.item_id for recommendation in recommendations] == [210933]
+
+
 def test_recommendations_use_five_count_shifted_price_for_discount_signal(tmp_path: Path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")
