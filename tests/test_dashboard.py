@@ -16,6 +16,7 @@ from wow_auction_tracker.features.dashboard.server import (
     _crafting_quality_from_raw_json,
     _dashboard_timezone,
     _has_buy_opportunity,
+    _smooth_item_history,
     create_dashboard_app,
     format_file_size,
 )
@@ -248,6 +249,26 @@ def test_dashboard_item_detail_groups_history_by_local_hour_and_weekday(tmp_path
     assert payload["day_of_week"][1]["average_median_unit_price"] == 30000
 
 
+def test_item_history_smoothing_removes_one_snapshot_spikes_and_keeps_sustained_changes() -> None:
+    prices = (10000, 10000, 10000, 400_000_000, 10000, 10000, 10000, 20000, 20000, 20000, 20000)
+    history = [
+        {
+            "first_quartile_unit_price": price,
+            "median_unit_price": price,
+            "third_quartile_unit_price": price,
+        }
+        for price in prices
+    ]
+
+    smoothed = _smooth_item_history(history)
+
+    assert smoothed[3]["smoothed_third_quartile_unit_price"] == 10000
+    assert smoothed[7]["smoothed_median_unit_price"] == 20000
+    assert smoothed[-1]["smoothed_first_quartile_unit_price"] == 20000
+    assert history[3]["third_quartile_unit_price"] == 400_000_000
+    assert "smoothed_third_quartile_unit_price" not in history[3]
+
+
 def test_dashboard_serves_item_page_api_empty_state_and_not_found(tmp_path: Path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")
@@ -274,6 +295,9 @@ def test_dashboard_serves_item_page_api_empty_state_and_not_found(tmp_path: Path
     assert page_response.status_code == 200
     assert b"Price by Hour of Day" in page_response.data
     assert b"Price by Day of Week" in page_response.data
+    assert b"Five-snapshot median with an outlier-resistant scale" in page_response.data
+    assert b'data-mode="raw"' in page_response.data
+    assert b"robustUpper" in page_response.data
     assert api_response.status_code == 200
     assert api_response.get_json()["item"]["name"] == "Bismuth"
     assert api_response.get_json()["summary"]["snapshot_count"] == 0

@@ -42,7 +42,7 @@ ITEM_DETAIL_HTML = """<!doctype html>
       border-bottom: 1px solid var(--line);
       background: rgba(255, 255, 255, .96);
     }
-    .identity, .item-title, .toolbar, .range-controls, .legend {
+    .identity, .item-title, .toolbar, .chart-controls, .mode-controls, .range-controls, .legend {
       display: flex;
       align-items: center;
     }
@@ -139,9 +139,15 @@ ITEM_DETAIL_HTML = """<!doctype html>
     .chart-wide { grid-column: 1 / -1; }
     .chart-body { padding: 12px 14px 14px; }
     canvas { display: block; width: 100%; height: 300px; }
-    .range-controls { gap: 5px; }
-    .range-button { height: 30px; padding: 0 9px; color: var(--muted); font-size: 12px; }
-    .range-button.active { border-color: var(--accent); background: #e7f2f7; color: var(--accent); font-weight: 700; }
+    .chart-controls { flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+    .mode-controls, .range-controls { gap: 5px; }
+    .mode-button, .range-button { height: 30px; padding: 0 9px; color: var(--muted); font-size: 12px; }
+    .mode-button.active, .range-button.active {
+      border-color: var(--accent);
+      background: #e7f2f7;
+      color: var(--accent);
+      font-weight: 700;
+    }
     .legend { flex-wrap: wrap; gap: 12px; min-height: 24px; color: var(--muted); font-size: 12px; }
     .legend-item { display: inline-flex; align-items: center; gap: 5px; }
     .legend-swatch { width: 18px; height: 3px; border-radius: 2px; }
@@ -240,13 +246,19 @@ ITEM_DETAIL_HTML = """<!doctype html>
         <div class="section-head">
           <div>
             <h2>Price History</h2>
-            <div class="section-note">First quartile, median, and third quartile by snapshot</div>
+            <div class="section-note" id="price-chart-note">Five-snapshot median with an outlier-resistant scale</div>
           </div>
-          <div class="range-controls" aria-label="History range">
-            <button class="range-button" data-hours="24" type="button">24h</button>
-            <button class="range-button active" data-hours="168" type="button">7d</button>
-            <button class="range-button" data-hours="720" type="button">30d</button>
-            <button class="range-button" data-hours="all" type="button">All</button>
+          <div class="chart-controls">
+            <div class="mode-controls" aria-label="Price chart smoothing">
+              <button class="mode-button active" data-mode="smoothed" type="button">Smoothed</button>
+              <button class="mode-button" data-mode="raw" type="button">Raw</button>
+            </div>
+            <div class="range-controls" aria-label="History range">
+              <button class="range-button" data-hours="24" type="button">24h</button>
+              <button class="range-button active" data-hours="168" type="button">7d</button>
+              <button class="range-button" data-hours="720" type="button">30d</button>
+              <button class="range-button" data-hours="all" type="button">All</button>
+            </div>
           </div>
         </div>
         <div class="chart-body">
@@ -321,6 +333,7 @@ ITEM_DETAIL_HTML = """<!doctype html>
     const colors = { q1: '#237a57', median: '#176b87', q3: '#8a5a1f', quantity: '#176b87' };
     let detail = null;
     let rangeHours = 168;
+    let priceMode = 'smoothed';
 
     const els = {
       status: document.getElementById('status'),
@@ -340,6 +353,7 @@ ITEM_DETAIL_HTML = """<!doctype html>
       sellConfidence: document.getElementById('sell-confidence'),
       snapshotCount: document.getElementById('snapshot-count'),
       historyRange: document.getElementById('history-range'),
+      priceChartNote: document.getElementById('price-chart-note'),
       recommendationAction: document.getElementById('recommendation-action'),
       recommendationBody: document.getElementById('recommendation-body'),
       anomalies: document.getElementById('anomalies'),
@@ -461,11 +475,15 @@ ITEM_DETAIL_HTML = """<!doctype html>
 
     function renderCharts() {
       const rows = historyForRange();
+      const priceKey = (key) => priceMode === 'smoothed' ? `smoothed_${key}` : key;
+      els.priceChartNote.textContent = priceMode === 'smoothed'
+        ? 'Five-snapshot median with an outlier-resistant scale'
+        : 'Raw quartile values for every recorded snapshot';
       drawLineChart('price-history', 'price-history-legend', rows, [
-        { key: 'first_quartile_unit_price', label: 'First quartile', color: colors.q1 },
-        { key: 'median_unit_price', label: 'Median', color: colors.median },
-        { key: 'third_quartile_unit_price', label: 'Third quartile', color: colors.q3 }
-      ], gold, (row) => row.display_time);
+        { key: priceKey('first_quartile_unit_price'), label: 'First quartile', color: colors.q1 },
+        { key: priceKey('median_unit_price'), label: 'Median', color: colors.median },
+        { key: priceKey('third_quartile_unit_price'), label: 'Third quartile', color: colors.q3 }
+      ], gold, (row) => row.display_time, { robustUpper: priceMode === 'smoothed' });
       drawLineChart('quantity-history', 'quantity-history-legend', rows, [
         { key: 'total_quantity', label: 'Available quantity', color: colors.quantity }
       ], integer, (row) => row.display_time);
@@ -481,7 +499,7 @@ ITEM_DETAIL_HTML = """<!doctype html>
       ], gold, (row) => row.label);
     }
 
-    function drawLineChart(canvasId, legendId, rows, series, formatter, labelForRow) {
+    function drawLineChart(canvasId, legendId, rows, series, formatter, labelForRow, options = {}) {
       const canvas = document.getElementById(canvasId);
       const ctx = canvas.getContext('2d');
       const width = canvas.width;
@@ -501,11 +519,20 @@ ITEM_DETAIL_HTML = """<!doctype html>
       const pad = { left: 82, right: 24, top: 22, bottom: 48 };
       const chartWidth = width - pad.left - pad.right;
       const chartHeight = height - pad.top - pad.bottom;
-      const minimum = Math.min(...values);
-      const maximum = Math.max(...values);
+      const numericValues = values.map(Number);
+      const minimum = Math.min(...numericValues);
+      const rawMaximum = Math.max(...numericValues);
+      const sortedValues = [...numericValues].sort((left, right) => left - right);
+      const robustMaximum = sortedValues[Math.floor((sortedValues.length - 1) * 0.99)];
+      const maximum = options.robustUpper && sortedValues.length >= 100 && rawMaximum > robustMaximum * 1.5
+        ? robustMaximum
+        : rawMaximum;
       const spread = Math.max(maximum - minimum, 1);
       const x = (index) => pad.left + (index / Math.max(rows.length - 1, 1)) * chartWidth;
-      const y = (value) => pad.top + chartHeight - ((value - minimum) / spread) * chartHeight;
+      const y = (value) => {
+        const bounded = Math.min(maximum, Math.max(minimum, Number(value)));
+        return pad.top + chartHeight - ((bounded - minimum) / spread) * chartHeight;
+      };
 
       ctx.strokeStyle = '#d7dee7';
       ctx.lineWidth = 1;
@@ -524,6 +551,8 @@ ITEM_DETAIL_HTML = """<!doctype html>
       series.forEach((line) => {
         ctx.strokeStyle = line.color;
         ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
         ctx.beginPath();
         let started = false;
         rows.forEach((row, index) => {
@@ -576,6 +605,13 @@ ITEM_DETAIL_HTML = """<!doctype html>
       button.addEventListener('click', () => {
         rangeHours = button.dataset.hours === 'all' ? 'all' : Number(button.dataset.hours);
         document.querySelectorAll('.range-button').forEach((candidate) => candidate.classList.toggle('active', candidate === button));
+        if (detail) renderCharts();
+      });
+    });
+    document.querySelectorAll('.mode-button').forEach((button) => {
+      button.addEventListener('click', () => {
+        priceMode = button.dataset.mode;
+        document.querySelectorAll('.mode-button').forEach((candidate) => candidate.classList.toggle('active', candidate === button));
         if (detail) renderCharts();
       });
     });

@@ -100,7 +100,9 @@ Click an item in the market, buy, or sell views to open its detail page. Item
 pages show current quartile pricing, price and inventory history, 24-hour,
 7-day, 30-day, and all-history ranges, average prices by hour and weekday,
 sell-through estimates, recommendation reasons, anomalies, and imported player
-outcomes.
+outcomes. Price history uses a five-snapshot rolling median and an
+outlier-resistant vertical scale by default to keep isolated listing spikes
+from flattening the chart; use **Raw** to inspect every recorded quartile value.
 
 Stored price summaries include minimum, first quartile, median, and third
 quartile unit prices. The dashboard emphasizes minimum, buy, sell, deposit, and

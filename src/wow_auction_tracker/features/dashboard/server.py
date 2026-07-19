@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -314,7 +315,9 @@ class DashboardDataStore:
                 (item_id,),
             ).fetchall()
 
-        history = [_item_detail_history_row(dict(row), timezone_name) for row in rows]
+        history = _smooth_item_history(
+            [_item_detail_history_row(dict(row), timezone_name) for row in rows]
+        )
         recommendation = _item_recommendation(self.database_url, item_id, timezone_name)
         return {
             "item": dict(item),
@@ -902,6 +905,31 @@ def _parse_dashboard_datetime(value: object) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _smooth_item_history(
+    history: list[dict[str, Any]],
+    *,
+    window_size: int = 5,
+) -> list[dict[str, Any]]:
+    if window_size < 1 or window_size % 2 == 0:
+        raise ValueError("window_size must be a positive odd number")
+
+    smoothed = [dict(row) for row in history]
+    radius = window_size // 2
+    price_keys = (
+        "first_quartile_unit_price",
+        "median_unit_price",
+        "third_quartile_unit_price",
+    )
+    for index, row in enumerate(smoothed):
+        start = max(0, index - radius)
+        end = min(len(history), index + radius + 1)
+        neighbors = history[start:end]
+        for key in price_keys:
+            values = [int(neighbor[key]) for neighbor in neighbors if neighbor.get(key) is not None]
+            row[f"smoothed_{key}"] = round(median(values)) if values else None
+    return smoothed
 
 
 def _item_detail_summary(history: list[dict[str, Any]]) -> dict[str, Any]:
