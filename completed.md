@@ -23,6 +23,8 @@ stay focused on future work.
     and weekday, using median bucket values for outlier-resistant charts.
   - Include sell-through estimates, current recommendation explanations,
     anomaly events, and imported player outcome history.
+  - Batch latest-snapshot listing lookups for dashboard item quality and
+    recommendation prices to keep tab loading fast as history grows.
 
 ## Snapshot Inference Features
 

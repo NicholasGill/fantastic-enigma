@@ -90,8 +90,18 @@ def test_recommendations_can_limit_scoring_to_one_item(tmp_path: Path) -> None:
         calculate_item_history_metrics(listings),
     )
 
-    recommendations = RecommendationEngine(f"sqlite:///{db_path}").recommend(item_id=210933)
+    engine = RecommendationEngine(f"sqlite:///{db_path}")
+    all_recommendations = engine.recommend()
+    recommendations = engine.recommend(item_id=210933)
 
+    shifted_prices = {
+        recommendation.item_id: recommendation.latest_shifted_unit_price
+        for recommendation in all_recommendations
+    }
+    assert shifted_prices == {
+        210930: 10000,
+        210933: 10000,
+    }
     assert [recommendation.item_id for recommendation in recommendations] == [210933]
 
 

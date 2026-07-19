@@ -166,9 +166,37 @@ class RecommendationEngine:
                 """,
                 parameters,
             ).fetchall()
-            return [self._load_item_inputs(connection, row) for row in item_rows]
+            latest_run = connection.execute(
+                "select id from fetch_runs where status = 'success' order by id desc limit 1"
+            ).fetchone()
+            shifted_fetch_run_id = int(latest_run["id"]) if latest_run is not None else None
+            shifted_prices = (
+                _load_shifted_unit_prices(
+                    connection,
+                    {int(row["item_id"]) for row in item_rows},
+                    shifted_fetch_run_id,
+                )
+                if shifted_fetch_run_id is not None
+                else {}
+            )
+            return [
+                self._load_item_inputs(
+                    connection,
+                    row,
+                    shifted_fetch_run_id=shifted_fetch_run_id,
+                    shifted_prices=shifted_prices,
+                )
+                for row in item_rows
+            ]
 
-    def _load_item_inputs(self, connection: sqlite3.Connection, item_row: sqlite3.Row) -> RecommendationInputs:
+    def _load_item_inputs(
+        self,
+        connection: sqlite3.Connection,
+        item_row: sqlite3.Row,
+        *,
+        shifted_fetch_run_id: int | None,
+        shifted_prices: dict[int, int],
+    ) -> RecommendationInputs:
         source_table = (
             "item_history_metrics"
             if _history_metric_count(connection, int(item_row["item_id"])) >= self.min_snapshots
@@ -243,7 +271,9 @@ class RecommendationEngine:
             snapshots=len(rows),
             latest_min_unit_price=int(latest["min_unit_price"]) if latest and latest["min_unit_price"] is not None else None,
             latest_shifted_unit_price=(
-                _load_shifted_unit_price(connection, int(item_row["item_id"]), latest_fetch_run_id)
+                shifted_prices.get(int(item_row["item_id"]))
+                if latest_fetch_run_id == shifted_fetch_run_id
+                else _load_shifted_unit_price(connection, int(item_row["item_id"]), latest_fetch_run_id)
                 if latest_fetch_run_id is not None
                 else None
             ),
@@ -574,35 +604,57 @@ def _load_shifted_unit_price(
     *,
     quantity_shift: int = CURRENT_PRICE_QUANTITY_SHIFT,
 ) -> int | None:
+    return _load_shifted_unit_prices(
+        connection,
+        {item_id},
+        fetch_run_id,
+        quantity_shift=quantity_shift,
+    ).get(item_id)
+
+
+def _load_shifted_unit_prices(
+    connection: sqlite3.Connection,
+    item_ids: set[int],
+    fetch_run_id: int,
+    *,
+    quantity_shift: int = CURRENT_PRICE_QUANTITY_SHIFT,
+) -> dict[int, int]:
+    if not item_ids:
+        return {}
     rows = connection.execute(
         """
-        select quantity, unit_price, buyout
+        select item_id, quantity, unit_price, buyout
         from auction_listings
         where fetch_run_id = ?
-            and item_id = ?
             and (unit_price is not null or buyout is not null)
         order by
+            item_id,
             coalesce(unit_price, buyout / nullif(quantity, 0)),
             auction_id,
             id
         """,
-        (fetch_run_id, item_id),
+        (fetch_run_id,),
     ).fetchall()
-    if not rows:
-        return None
-
-    cumulative_quantity = 0
-    fallback_price: int | None = None
+    cumulative_quantities = {item_id: 0 for item_id in item_ids}
+    fallback_prices: dict[int, int] = {}
+    shifted_prices: dict[int, int] = {}
     for row in rows:
+        item_id = int(row["item_id"])
+        if item_id not in item_ids or item_id in shifted_prices:
+            continue
         quantity = max(int(row["quantity"] or 0), 1)
         unit_price = _listing_unit_price(row)
         if unit_price is None:
             continue
-        fallback_price = unit_price
-        cumulative_quantity += quantity
-        if cumulative_quantity >= quantity_shift:
-            return unit_price
-    return fallback_price
+        fallback_prices[item_id] = unit_price
+        cumulative_quantities[item_id] += quantity
+        if cumulative_quantities[item_id] >= quantity_shift:
+            shifted_prices[item_id] = unit_price
+    return {
+        item_id: shifted_prices.get(item_id, fallback_prices[item_id])
+        for item_id in item_ids
+        if item_id in shifted_prices or item_id in fallback_prices
+    }
 
 
 def _listing_unit_price(row: sqlite3.Row) -> int | None:

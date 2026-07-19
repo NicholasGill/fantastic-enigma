@@ -94,7 +94,9 @@ uv run wow-auctions dashboard
 
 Open `http://127.0.0.1:8000` to inspect database size, snapshot counts, latest
 item summaries, recommendations, recent runs, and per-item price history. Use
-`--port` if port 8000 is already in use.
+`--port` if port 8000 is already in use. Dashboard overview queries batch latest
+snapshot listing lookups so loading tabs does not rescan listing history for
+each tracked item.
 
 Click an item in the market, buy, or sell views to open its detail page. Item
 pages show current quartile pricing, price and inventory history, 24-hour,

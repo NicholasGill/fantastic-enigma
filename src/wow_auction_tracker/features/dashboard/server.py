@@ -567,12 +567,17 @@ class DashboardDataStore:
             (previous_run_id, latest_run_id),
         ).fetchall()
         items = [dict(row) for row in rows]
+        crafting_qualities = _latest_crafting_qualities(
+            connection,
+            latest_run_id,
+            {int(item["item_id"]) for item in items},
+        )
         for item in items:
-            item["crafting_quality"] = _latest_crafting_quality(
+            item_id = int(item["item_id"])
+            item["crafting_quality"] = crafting_qualities.get(item_id) or _crafting_quality_from_item_rank(
                 connection,
-                latest_run_id,
-                int(item["item_id"]),
-            ) or _crafting_quality_from_item_rank(connection, int(item["item_id"]))
+                item_id,
+            )
         return items
 
     @staticmethod
@@ -1534,30 +1539,38 @@ def _apply_dev_buy_opportunities(items: list[dict[str, Any]], *, limit: int = 3)
             return
 
 
-def _latest_crafting_quality(
+def _latest_crafting_qualities(
     connection: sqlite3.Connection,
     fetch_run_id: int,
-    item_id: int,
-) -> str | None:
+    item_ids: set[int],
+) -> dict[int, str]:
+    if not item_ids:
+        return {}
     rows = connection.execute(
         """
-        select raw_json
+        select item_id, raw_json
         from auction_listings
-        where fetch_run_id = ? and item_id = ?
-        limit 250
+        where fetch_run_id = ?
+        order by id
         """,
-        (fetch_run_id, item_id),
+        (fetch_run_id,),
     ).fetchall()
-    qualities = {
-        quality
-        for row in rows
-        if (quality := _crafting_quality_from_raw_json(str(row["raw_json"]))) is not None
+    qualities: dict[int, set[str]] = {item_id: set() for item_id in item_ids}
+    sampled_counts: dict[int, int] = {item_id: 0 for item_id in item_ids}
+    for row in rows:
+        item_id = int(row["item_id"])
+        if item_id not in qualities or sampled_counts[item_id] >= 250:
+            continue
+        sampled_counts[item_id] += 1
+        quality = _crafting_quality_from_raw_json(str(row["raw_json"]))
+        if quality is not None:
+            qualities[item_id].add(quality)
+
+    return {
+        item_id: next(iter(values)) if len(values) == 1 else "mixed"
+        for item_id, values in qualities.items()
+        if values
     }
-    if not qualities:
-        return None
-    if len(qualities) == 1:
-        return next(iter(qualities))
-    return "mixed"
 
 
 def _crafting_quality_from_raw_json(raw_json: str) -> str | None:
