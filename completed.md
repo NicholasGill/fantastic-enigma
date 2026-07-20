@@ -29,6 +29,10 @@ stay focused on future work.
     anomaly events, and imported player outcome history.
   - Batch latest-snapshot listing lookups for dashboard item quality and
     recommendation prices to keep tab loading fast as history grows.
+  - Group same-name crafting reagents into tier families, compare current
+    five-unit-depth prices, and highlight price inversions in a dedicated table.
+  - Suppress buy targets and buy scores for a tier when an equal or higher tier
+    has the same or lower current price, while preserving sell signals.
 
 ## Snapshot Inference Features
 

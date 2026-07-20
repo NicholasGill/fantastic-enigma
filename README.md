@@ -121,6 +121,13 @@ actual minimum price. Sparse samples are not filtered. The dashboard emphasizes
 minimum, buy, sell, deposit, and net profit per unit so the active view stays
 focused on flip decisions.
 
+Tracked items with the same name and market are also treated as one crafting
+tier family. The dashboard compares Tier 1, Tier 2, and Tier 3 using the current
+price at five-unit market depth, falling back to the robust median. A tier is
+marked as dominated when an equal or higher crafting tier is available at the
+same or lower price. Dominated tiers remain visible and can still receive sell
+signals, but their buy score and buy target are suppressed.
+
 Snapshot fetches also collect missing item metadata from Blizzard's item and
 media endpoints, including item quality, class, subclass, stackability, vendor
 prices, and icon URL.

@@ -76,6 +76,7 @@ class DashboardDataStore:
                     display_timezone=display_timezone,
                 ).recommend()
             ]
+            tier_families = _tier_families_for_overview(all_recommendations)
             buy_recommendations = sorted(
                 [
                     item for item in all_recommendations
@@ -138,6 +139,15 @@ class DashboardDataStore:
                 item["historical_buy_price"] = recommendation.get("historical_buy_price")
                 item["historical_sell_price"] = recommendation.get("historical_sell_price")
                 item["historical_timing_confidence"] = recommendation.get("historical_timing_confidence")
+                item["tier_family"] = recommendation.get("tier_family")
+                item["tier_quality"] = recommendation.get("tier_quality")
+                item["tier_market_price"] = recommendation.get("tier_market_price")
+                item["tier_is_best_value"] = recommendation.get("tier_is_best_value")
+                item["tier_price_premium_bps"] = recommendation.get("tier_price_premium_bps")
+                item["tier_dominated_by_item_id"] = recommendation.get("tier_dominated_by_item_id")
+                item["tier_dominated_by_quality"] = recommendation.get("tier_dominated_by_quality")
+                item["tier_dominated_by_unit_price"] = recommendation.get("tier_dominated_by_unit_price")
+                item["tier_dominance_savings_bps"] = recommendation.get("tier_dominance_savings_bps")
                 item["has_buy_opportunity"] = _has_buy_opportunity(
                     recommendation.get("latest_shifted_unit_price") or item.get("min_unit_price"),
                     recommendation.get("recommended_buy_price"),
@@ -166,6 +176,7 @@ class DashboardDataStore:
                 "recommendations": recommendations,
                 "buy_recommendations": buy_recommendations,
                 "sell_recommendations": sell_recommendations,
+                "tier_families": tier_families,
                 "craft_opportunities": self._craft_opportunities(connection, latest_run["id"] if latest_run else None),
                 "player_activity": self._player_activity(connection),
                 "dev_mode": dev_mode,
@@ -1525,6 +1536,8 @@ def _has_buy_opportunity(min_unit_price: object, recommended_buy_price: object) 
 def _apply_dev_buy_opportunities(items: list[dict[str, Any]], *, limit: int = 3) -> None:
     decorated = 0
     for item in items:
+        if item.get("tier_dominated_by_item_id") is not None:
+            continue
         min_price = item.get("min_unit_price")
         if min_price is None:
             continue
@@ -1539,6 +1552,49 @@ def _apply_dev_buy_opportunities(items: list[dict[str, Any]], *, limit: int = 3)
         decorated += 1
         if decorated >= limit:
             return
+
+
+def _tier_families_for_overview(
+    recommendations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for recommendation in recommendations:
+        family = recommendation.get("tier_family")
+        quality = recommendation.get("tier_quality")
+        if family is None or quality is None:
+            continue
+        grouped.setdefault((str(family), str(recommendation["market"])), []).append(
+            {
+                "item_id": int(recommendation["item_id"]),
+                "name": str(recommendation["name"]),
+                "quality": int(quality),
+                "typical_unit_price": recommendation.get("tier_market_price"),
+                "is_best_value": bool(recommendation.get("tier_is_best_value")),
+                "price_premium_bps": recommendation.get("tier_price_premium_bps"),
+                "is_dominated": recommendation.get("tier_dominated_by_item_id") is not None,
+                "dominated_by_item_id": recommendation.get("tier_dominated_by_item_id"),
+                "dominated_by_quality": recommendation.get("tier_dominated_by_quality"),
+                "dominated_by_unit_price": recommendation.get("tier_dominated_by_unit_price"),
+                "dominance_savings_bps": recommendation.get("tier_dominance_savings_bps"),
+            }
+        )
+
+    families = [
+        {
+            "name": name,
+            "market": market,
+            "has_price_inversion": any(tier["is_dominated"] for tier in tiers),
+            "tiers": sorted(tiers, key=lambda tier: int(tier["quality"])),
+        }
+        for (name, market), tiers in grouped.items()
+    ]
+    return sorted(
+        families,
+        key=lambda family: (
+            not bool(family["has_price_inversion"]),
+            str(family["name"]).casefold(),
+        ),
+    )
 
 
 def _latest_crafting_qualities(
@@ -1735,6 +1791,35 @@ DASHBOARD_HTML = """<!doctype html>
       display: grid;
       grid-template-columns: minmax(0, 1fr) 360px;
       gap: 18px;
+    }
+    .tier-comparison { margin-bottom: 18px; }
+    .tier-comparison[hidden] { display: none; }
+    .tier-comparison .section-head h2 { flex: 0 0 auto; }
+    .tier-comparison .section-head .muted { text-align: right; }
+    .tier-table-wrap { overflow: auto; max-height: 340px; }
+    .tier-table { min-width: 760px; }
+    .tier-cell {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 3px;
+    }
+    .tier-cell strong { font-size: 14px; }
+    .tier-cell small { color: var(--muted); }
+    .tier-cell.dominated strong, .tier-inversion { color: var(--bad); }
+    .tier-cell.best-value strong, .tier-best { color: var(--good); }
+    .tier-warning-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      margin-left: 7px;
+      padding: 0 7px;
+      border-radius: 999px;
+      background: #f8e8e6;
+      color: var(--bad);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
     }
     .player-grid {
       display: grid;
@@ -2120,6 +2205,26 @@ DASHBOARD_HTML = """<!doctype html>
   <main>
 
     <div class="tab-panel active" id="market-panel" role="tabpanel" aria-labelledby="market-tab" data-panel="market">
+      <section class="tier-comparison" id="tier-comparison" hidden>
+        <div class="section-head">
+          <h2>Material Tier Comparison</h2>
+          <span class="muted">Current 5-unit-depth prices with median fallback; equal or higher quality at a lower price dominates a tier.</span>
+        </div>
+        <div class="tier-table-wrap">
+          <table class="tier-table">
+            <thead>
+              <tr>
+                <th>Material</th>
+                <th>Tier 1</th>
+                <th>Tier 2</th>
+                <th>Tier 3</th>
+                <th>Market Signal</th>
+              </tr>
+            </thead>
+            <tbody id="tier-families"></tbody>
+          </table>
+        </div>
+      </section>
       <div class="market-layout">
         <div>
           <section>
@@ -2441,6 +2546,8 @@ DASHBOARD_HTML = """<!doctype html>
       plNote: document.getElementById('pl-note'),
       profitLossTable: document.getElementById('profit-loss-table'),
       latestTime: document.getElementById('latest-time'),
+      tierComparison: document.getElementById('tier-comparison'),
+      tierFamilies: document.getElementById('tier-families'),
       items: document.getElementById('items'),
       recommendations: document.getElementById('recommendations'),
       buyRecommendationsTable: document.getElementById('buy-recommendations-table'),
@@ -2612,6 +2719,7 @@ DASHBOARD_HTML = """<!doctype html>
       els.craftSignals.textContent = integer(overview.craft_opportunities?.length);
       els.latestTime.textContent = overview.latest_run ? shortTime(overview.latest_run.finished_at) : '-';
       document.body.classList.toggle('dev-mode-active', Boolean(overview.dev_mode));
+      renderTierFamilies();
       renderItems();
       renderRecommendations();
       renderOpportunityTabs();
@@ -2620,6 +2728,41 @@ DASHBOARD_HTML = """<!doctype html>
       renderPlayerActivity();
       renderProfitLoss();
       renderRuns();
+    }
+
+    function renderTierFamilies() {
+      const families = overview.tier_families || [];
+      els.tierComparison.hidden = !families.length;
+      els.tierFamilies.innerHTML = families.map((family) => {
+        const tiers = Object.fromEntries((family.tiers || []).map((tier) => [Number(tier.quality), tier]));
+        const inversions = (family.tiers || []).filter((tier) => tier.is_dominated);
+        const signal = inversions.length
+          ? inversions.map((tier) => `Tier ${tier.dominated_by_quality} is ${bps(tier.dominance_savings_bps)} cheaper than Tier ${tier.quality}`).join('; ')
+          : 'No dominated tiers';
+        return `<tr>
+          <td><strong>${itemName(family.name)}</strong><br><span class="muted">${family.market}</span></td>
+          <td>${tierComparisonCell(tiers[1])}</td>
+          <td>${tierComparisonCell(tiers[2])}</td>
+          <td>${tierComparisonCell(tiers[3])}</td>
+          <td class="${inversions.length ? 'tier-inversion' : 'tier-best'}">${signal}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    function tierComparisonCell(tier) {
+      if (!tier) return '<span class="muted">Not tracked</span>';
+      const classes = ['tier-cell'];
+      if (tier.is_dominated) classes.push('dominated');
+      if (tier.is_best_value) classes.push('best-value');
+      const note = tier.is_dominated
+        ? `Avoid · Tier ${tier.dominated_by_quality} is cheaper`
+        : tier.is_best_value
+          ? 'Lowest current price'
+          : `${bps(tier.price_premium_bps)} premium`;
+      return `<span class="${classes.join(' ')}">
+        <strong><a class="item-link" href="/items/${tier.item_id}">${gold(tier.typical_unit_price)}</a></strong>
+        <small>${note}</small>
+      </span>`;
     }
 
     function renderItems() {
@@ -2640,8 +2783,11 @@ DASHBOARD_HTML = """<!doctype html>
         const icon = item.icon_url ? `<img class="item-icon" src="${item.icon_url}" alt="">` : '';
         const subtitle = [item.item_class, item.item_subclass].filter(Boolean).join(' / ');
         const devMarker = item.dev_buy_opportunity ? '<span class="dev-marker">Dev</span>' : '';
+        const tierWarning = item.tier_dominated_by_quality
+          ? `<span class="tier-warning-badge" title="An equal or higher crafting tier has a lower current comparison price">Tier ${item.tier_dominated_by_quality} cheaper</span>`
+          : '';
         return `<tr${classAttribute} data-item-id="${item.item_id}">
-          <td><span class="item-cell">${icon}<span class="item-meta"><span><a class="item-link" href="/items/${item.item_id}">${item.name}</a>${devMarker}</span><small>${subtitle}</small></span></span></td>
+          <td><span class="item-cell">${icon}<span class="item-meta"><span><a class="item-link" href="/items/${item.item_id}">${item.name}</a>${devMarker}${tierWarning}</span><small>${subtitle}</small></span></span></td>
           <td><span class="quality-badge ${qualityClass(item.crafting_quality)}">${qualityLabel(item.crafting_quality)}</span></td>
           <td>${item.item_id}</td>
           <td>${gold(item.min_unit_price)}</td>

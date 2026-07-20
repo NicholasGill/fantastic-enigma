@@ -105,6 +105,71 @@ def test_recommendations_can_limit_scoring_to_one_item(tmp_path: Path) -> None:
     assert [recommendation.item_id for recommendation in recommendations] == [210933]
 
 
+def test_recommendations_suppress_buying_a_tier_dominated_by_higher_quality(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "auction_tracker.sqlite3"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    repository = AuctionRepository(engine)
+    config = TrackerConfig.model_validate(
+        {
+            "items": [
+                {"id": 210930, "name": "Bismuth", "market": "commodity"},
+                {"id": 210931, "name": "Bismuth", "market": "commodity"},
+                {"id": 210932, "name": "Bismuth", "market": "commodity"},
+            ]
+        }
+    )
+    prices_by_run = (
+        (300, 1000, 330),
+        (300, 1000, 330),
+        (300, 700, 330),
+    )
+    for run_index, prices in enumerate(prices_by_run, start=1):
+        run_id = repository.start_fetch_run(config)
+        listings = [
+            AuctionListing(
+                auction_id=(run_index * 10) + item_index,
+                item_id=item_id,
+                market=Market.COMMODITY,
+                quantity=10,
+                unit_price=price,
+                buyout=None,
+                bid=None,
+                time_left="LONG",
+                raw={"item": {"id": item_id}},
+            )
+            for item_index, (item_id, price) in enumerate(
+                zip((210930, 210931, 210932), prices, strict=True),
+                start=1,
+            )
+        ]
+        repository.complete_fetch_run(
+            run_id,
+            listings,
+            summarize_listings(listings),
+            calculate_item_history_metrics(listings),
+        )
+
+    recommendation = RecommendationEngine(
+        f"sqlite:///{db_path}",
+        lookback_runs=3,
+    ).recommend(item_id=210931)[0]
+
+    assert recommendation.tier_family == "Bismuth"
+    assert recommendation.tier_quality == 2
+    assert recommendation.tier_market_price == 700
+    assert recommendation.tier_dominated_by_item_id == 210932
+    assert recommendation.tier_dominated_by_quality == 3
+    assert recommendation.tier_dominated_by_unit_price == 330
+    assert recommendation.buy_score == 0
+    assert recommendation.recommended_buy_price is None
+    assert recommendation.estimated_profit_unit_price is None
+    assert recommendation.action != "buy"
+    assert recommendation.reasons[0].startswith("Tier 2 buy suppressed")
+
+
 def test_recommendations_use_five_count_shifted_price_for_discount_signal(tmp_path: Path) -> None:
     db_path = tmp_path / "auction_tracker.sqlite3"
     engine = create_db_engine(f"sqlite:///{db_path}")

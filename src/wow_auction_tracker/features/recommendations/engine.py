@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean, median
@@ -9,6 +9,12 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.engine import make_url
+
+from wow_auction_tracker.features.tiers import (
+    TierMarketAnalysis,
+    TierMarketItem,
+    analyze_tier_market,
+)
 
 AUCTION_DEPOSIT_RATE_BPS_BY_DURATION_HOURS = {
     12: 1500,
@@ -101,6 +107,15 @@ class Recommendation:
     historical_sell_price: int | None
     historical_timing_confidence: int
     reasons: list[str]
+    tier_family: str | None = None
+    tier_quality: int | None = None
+    tier_market_price: int | None = None
+    tier_is_best_value: bool = False
+    tier_price_premium_bps: int | None = None
+    tier_dominated_by_item_id: int | None = None
+    tier_dominated_by_quality: int | None = None
+    tier_dominated_by_unit_price: int | None = None
+    tier_dominance_savings_bps: int | None = None
 
 
 DEFAULT_DISPLAY_TIMEZONE = "America/New_York"
@@ -142,6 +157,9 @@ class RecommendationEngine:
     ) -> list[Recommendation]:
         inputs = self._load_inputs(item_id=item_id)
         recommendations = [self._score(item) for item in inputs]
+        recommendations = _apply_tier_market_context(recommendations)
+        if item_id is not None:
+            recommendations = [item for item in recommendations if item.item_id == item_id]
         recommendations.sort(key=lambda item: (item.score, item.confidence, item.estimated_demand_score), reverse=True)
         if limit is not None:
             return recommendations[:limit]
@@ -150,8 +168,25 @@ class RecommendationEngine:
     def _load_inputs(self, *, item_id: int | None = None) -> list[RecommendationInputs]:
         with sqlite3.connect(self.database_path) as connection:
             connection.row_factory = sqlite3.Row
-            where_clause = "where t.item_id = ?" if item_id is not None else ""
-            parameters: tuple[int, ...] = (item_id,) if item_id is not None else ()
+            where_clause = ""
+            parameters: tuple[object, ...] = ()
+            if item_id is not None:
+                target = connection.execute(
+                    """
+                    select coalesce(m.name, t.name, 'Item ' || t.item_id) as name, t.market
+                    from tracked_items t
+                    left join item_metadata m on m.item_id = t.item_id
+                    where t.item_id = ?
+                    """,
+                    (item_id,),
+                ).fetchone()
+                if target is None:
+                    return []
+                where_clause = (
+                    "where coalesce(m.name, t.name, 'Item ' || t.item_id) = ? "
+                    "and t.market = ?"
+                )
+                parameters = (str(target["name"]), str(target["market"]))
             item_rows = connection.execute(
                 f"""
                 select
@@ -471,8 +506,77 @@ def recommendation_to_dict(recommendation: Recommendation) -> dict[str, Any]:
         "historical_buy_price": recommendation.historical_buy_price,
         "historical_sell_price": recommendation.historical_sell_price,
         "historical_timing_confidence": recommendation.historical_timing_confidence,
+        "tier_family": recommendation.tier_family,
+        "tier_quality": recommendation.tier_quality,
+        "tier_market_price": recommendation.tier_market_price,
+        "tier_is_best_value": recommendation.tier_is_best_value,
+        "tier_price_premium_bps": recommendation.tier_price_premium_bps,
+        "tier_dominated_by_item_id": recommendation.tier_dominated_by_item_id,
+        "tier_dominated_by_quality": recommendation.tier_dominated_by_quality,
+        "tier_dominated_by_unit_price": recommendation.tier_dominated_by_unit_price,
+        "tier_dominance_savings_bps": recommendation.tier_dominance_savings_bps,
         "reasons": recommendation.reasons,
     }
+
+
+def _apply_tier_market_context(
+    recommendations: list[Recommendation],
+) -> list[Recommendation]:
+    analysis_by_item_id = analyze_tier_market(
+        TierMarketItem(
+            item_id=item.item_id,
+            name=item.name,
+            market=item.market,
+            typical_unit_price=(
+                item.latest_shifted_unit_price or item.latest_median_unit_price
+            ),
+        )
+        for item in recommendations
+    )
+    contextualized: list[Recommendation] = []
+    for recommendation in recommendations:
+        analysis = analysis_by_item_id.get(recommendation.item_id)
+        if analysis is None:
+            contextualized.append(recommendation)
+            continue
+
+        changes: dict[str, object] = {
+            "tier_family": analysis.family_name,
+            "tier_quality": analysis.quality,
+            "tier_market_price": analysis.typical_unit_price,
+            "tier_is_best_value": analysis.is_best_value,
+            "tier_price_premium_bps": analysis.price_premium_bps,
+            "tier_dominated_by_item_id": analysis.dominated_by_item_id,
+            "tier_dominated_by_quality": analysis.dominated_by_quality,
+            "tier_dominated_by_unit_price": analysis.dominated_by_unit_price,
+            "tier_dominance_savings_bps": analysis.dominance_savings_bps,
+        }
+        if analysis.is_dominated:
+            changes.update(
+                action=_action_for_scores(0, recommendation.sell_score),
+                score=recommendation.sell_score,
+                buy_score=0,
+                recommended_buy_price=None,
+                estimated_profit_unit_price=None,
+                reasons=[_tier_dominance_reason(analysis), *recommendation.reasons],
+            )
+        contextualized.append(replace(recommendation, **changes))
+    return contextualized
+
+
+def _tier_dominance_reason(analysis: TierMarketAnalysis) -> str:
+    quality = analysis.quality
+    better_quality = int(analysis.dominated_by_quality or 0)
+    savings_bps = int(analysis.dominance_savings_bps or 0)
+    savings_percent = round(savings_bps / 100)
+    if savings_percent > 0:
+        price_note = f"at a {savings_percent}% lower typical price"
+    else:
+        price_note = "at the same typical price"
+    return (
+        f"Tier {quality} buy suppressed: Tier {better_quality} offers equal or better "
+        f"crafting quality {price_note}"
+    )
 
 
 def _sqlite_database_path(database_url: str) -> str:

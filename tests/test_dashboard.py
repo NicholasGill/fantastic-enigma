@@ -108,6 +108,8 @@ def test_dashboard_overview_returns_latest_counts_and_items(tmp_path: Path) -> N
     assert payload["items"][0]["recommended_sell_price_source"] is None
     assert "buy_recommendations" in payload
     assert "sell_recommendations" in payload
+    assert payload["tier_families"][0]["name"] == "Bismuth"
+    assert [tier["quality"] for tier in payload["tier_families"][0]["tiers"]] == [1, 2, 3]
     assert payload["items"][0]["crafting_quality"] == "1"
     assert payload["craft_opportunities"] == []
     assert payload["player_activity"]["summary"]["listing_count"] == 0
@@ -1128,6 +1130,10 @@ def test_dashboard_table_headers_have_tooltips() -> None:
     assert "Sell Opportunities" in DASHBOARD_HTML
     assert "buy_recommendations" in DASHBOARD_HTML
     assert "sell_recommendations" in DASHBOARD_HTML
+    assert "Material Tier Comparison" in DASHBOARD_HTML
+    assert 'id="tier-families"' in DASHBOARD_HTML
+    assert "function renderTierFamilies" in DASHBOARD_HTML
+    assert "Tier ${item.tier_dominated_by_quality} cheaper" in DASHBOARD_HTML
     assert "Known P/L" in DASHBOARD_HTML
     assert "costBasisLabel" in DASHBOARD_HTML
     assert "setActiveTab" in DASHBOARD_HTML

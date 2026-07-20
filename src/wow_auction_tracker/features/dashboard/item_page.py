@@ -415,7 +415,11 @@ ITEM_DETAIL_HTML = """<!doctype html>
       const latest = summary.latest || {};
       document.title = `${item.name} · WoW Auction Tracker`;
       els.itemName.textContent = item.name;
-      els.itemMeta.textContent = `#${item.item_id} · ${item.market} · ${[item.item_class, item.item_subclass].filter(Boolean).join(' / ') || 'Auction item'}`;
+      const tierLabel = detail.recommendation?.tier_quality
+        ? `Tier ${detail.recommendation.tier_quality}`
+        : null;
+      const classification = [tierLabel, item.item_class, item.item_subclass].filter(Boolean).join(' / ') || 'Auction item';
+      els.itemMeta.textContent = `#${item.item_id} · ${item.market} · ${classification}`;
       if (item.icon_url) {
         els.itemIcon.src = item.icon_url;
         els.itemIcon.hidden = false;
